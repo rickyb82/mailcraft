@@ -57,6 +57,7 @@
 |---|---|
 | 2026-10-13 | 0.1: model, autoconfig, IMAP/SMTP transport with in-process test servers, engine with commands and cache, Gmail-style egui UI, MCP server with configuration prompts, CLI |
 | 2026-10-13 | Web app: `MailSession` abstraction, snapshots by revision, `mailcraft-remote`, `mailcraft-cli serve` (HTTP API, static files, token), `apps/mailcraft-web` on GitHub Pages |
+| 2026-10-13 | Compose toolbar fixes found in the browser: the body's selection is remembered across the focus loss a toolbar click causes (egui collapses it), the focus returns to the body on the next quiet frame (a click frame takes it straight back), `c` with a message open brings it back instead of replacing it |
 | 2026-10-13 | Compose shows the styles instead of the marks: a layouter (`ui-egui/src/richtext.rs`) draws bold (faux, egui has no bold face), italic, underline, sizes, colours, lists, indent, centred/right lines and links in the text box, with the marks laid out as zero-width transparent slivers so cursor and edits keep working on the plain markup |
 | 2026-10-13 | Gmail-like compose toolbars: formatting row (font, size, B/I/U, text colour, alignment, lists, indent, undo/redo; markup spans `{color=}` `{size=}` `{font=}` `{align=}` `{indent}` rendered in the HTML) toggled by "Aa", action row (Send with menu, attach, link, emoji, image, signature, print, more, discard) |
 | 2026-10-13 | Multi-user server for frameworks: `--users-dir`, service and per-user tokens, `/api/users`, MCP over the server (`mcp --server`), Dockerfile and compose, deploy guide |

@@ -62,7 +62,7 @@ const EMOJI: [&str; 24] =
 /// alignment, lists, indent, undo/redo. Each button marks the selection up.
 fn format_row(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, c: &mut crate::Compose, body_id: egui::Id) {
     let ctx = ui.ctx().clone();
-    let sel = format::selection(&ctx, body_id);
+    let sel = c.selection.or_else(|| format::selection(&ctx, body_id));
     let mut caret: Option<usize> = None;
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
@@ -153,23 +153,24 @@ fn format_row(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, c: &mut crate::C
         if icon_button(ui, t, Icon::Indent, app.tr("Indent"), true, false).clicked() {
             caret = Some(format::line_mark(&mut c.body, sel, "{indent}"));
         }
-        if icon_button(ui, t, Icon::Undo, app.tr("Undo"), true, false).clicked() {
-            format::undo(&ctx, body_id, &mut c.body, false);
+        if icon_button(ui, t, Icon::Undo, app.tr("Undo"), true, false).clicked() && format::undo(&ctx, body_id, &mut c.body, false) {
+            caret = format::selection(&ctx, body_id).map(|(a, _)| a);
         }
-        if icon_button(ui, t, Icon::Redo, app.tr("Redo"), true, false).clicked() {
-            format::undo(&ctx, body_id, &mut c.body, true);
+        if icon_button(ui, t, Icon::Redo, app.tr("Redo"), true, false).clicked() && format::undo(&ctx, body_id, &mut c.body, true) {
+            caret = format::selection(&ctx, body_id).map(|(a, _)| a);
         }
     });
     if let Some(i) = caret {
-        format::set_caret(&ctx, body_id, i);
+        c.refocus = Some(i);
     }
 }
 
 /// Inserts `s` at the caret (or at the end) and puts the caret after it.
-fn insert_at_caret(ctx: &egui::Context, body_id: egui::Id, body: &mut String, s: &str) {
-    let sel = format::selection(ctx, body_id);
+fn insert_at_caret(ctx: &egui::Context, body_id: egui::Id, c: &mut crate::Compose, s: &str) {
+    let sel = c.selection.or_else(|| format::selection(ctx, body_id));
+    let body = &mut c.body;
     let caret = format::wrap(body, sel.map(|(a, _)| (a, a)), s, "");
-    format::set_caret(ctx, body_id, caret);
+    c.refocus = Some(caret);
 }
 
 /// What the bottom row asked for.
@@ -210,9 +211,8 @@ fn action_row(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, c: &mut crate::C
             app.requests.push(Request::AttachFiles);
         }
         if icon_button(ui, t, Icon::Link, app.tr("Insert link"), true, false).clicked() {
-            let sel = format::selection(&ctx, body_id);
-            let caret = format::link(&mut c.body, sel);
-            format::set_caret(&ctx, body_id, caret);
+            let sel = c.selection.or_else(|| format::selection(&ctx, body_id));
+            c.refocus = Some(format::link(&mut c.body, sel));
         }
         let emoji_btn = icon_button(ui, t, Icon::Emoji, app.tr("Insert emoji"), true, false);
         let mut emoji: Option<&str> = None;
@@ -231,7 +231,7 @@ fn action_row(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, c: &mut crate::C
             });
         });
         if let Some(e) = emoji {
-            insert_at_caret(&ctx, body_id, &mut c.body, e);
+            insert_at_caret(&ctx, body_id, c, e);
         }
         if icon_button(ui, t, Icon::Image, app.tr("Insert image"), true, false).clicked() {
             c.inline_from = Some(c.attachments.len());
@@ -247,7 +247,7 @@ fn action_row(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, c: &mut crate::C
             if signature.is_empty() {
                 app.status = app.tr("No signature set for this account: add one in Settings").to_string();
             } else {
-                insert_at_caret(&ctx, body_id, &mut c.body, &format!("\n\n{signature}\n"));
+                insert_at_caret(&ctx, body_id, c, &format!("\n\n{signature}\n"));
             }
         }
         if icon_button(ui, t, Icon::Print, app.tr("Print"), true, false).clicked() {
@@ -449,6 +449,15 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                     if !c.hide_format {
                         format_row(app, ui, t, &mut c, body_id);
                     }
+                    if let Some(i) = c.refocus {
+                        // A click frame would take the focus straight back: wait for a quiet one.
+                        if ui.input(|inp| inp.pointer.any_click() || inp.pointer.any_pressed() || inp.pointer.any_down()) {
+                            ui.ctx().request_repaint();
+                        } else {
+                            format::set_caret(ui.ctx(), body_id, i);
+                            c.refocus = None;
+                        }
+                    }
                     // The text is shown as it will look: marks hidden, styles drawn.
                     let palette = crate::richtext::Palette { text: t.ui_text, muted: t.muted, link: t.link };
                     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
@@ -464,6 +473,12 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                         .layouter(&mut layouter)
                         .show(ui);
                     let body = out.response.response;
+                    if ui.memory(|m| m.has_focus(body_id)) {
+                        c.selection = out.cursor_range.map(|r| {
+                            let (a, b) = (r.primary.index.0, r.secondary.index.0);
+                            (a.min(b), a.max(b))
+                        });
+                    }
                     if c.body.contains("**") {
                         // Faux bold: the bold runs painted once more, half a point to the right.
                         let wrap = out.galley.job.wrap.max_width;

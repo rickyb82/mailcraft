@@ -104,6 +104,13 @@ pub struct Compose {
     pub inline_from: Option<usize>,
     /// The formatting row ("Aa") is shown above the text unless hidden.
     pub hide_format: bool,
+    /// The body's selection (character indices) as of the last frame it had the focus: egui
+    /// collapses the selection when the text box loses the focus to a toolbar button, so the
+    /// toolbar formats this one.
+    pub selection: Option<(usize, usize)>,
+    /// Give the body the focus back with the caret here, on the next frame without a click
+    /// (egui takes the focus away again from a text box that is not under a click).
+    pub refocus: Option<usize>,
 }
 
 /// The whole app state the UI keeps on top of the engine session.
@@ -580,6 +587,12 @@ impl MailApp {
     }
 
     pub fn compose_new(&mut self) {
+        if let Some(c) = &mut self.compose {
+            // A message is already being written: bring it back instead of replacing it.
+            c.minimized = false;
+            c.focus_body = true;
+            return;
+        }
         self.compose = Some(Compose { focus_body: false, from_account: self.acting_account(), ..Compose::default() });
     }
 
@@ -1069,6 +1082,12 @@ mod tests {
         assert_eq!(app.session.view().selection.len(), 1);
         frame(&mut app, &ctx, vec![key(egui::Key::C, egui::Modifiers::NONE)]);
         assert!(app.compose.is_some());
+        // Another `c` (typed with nothing focused) keeps the draft being written.
+        if let Some(c) = &mut app.compose {
+            c.body = "testo".into();
+        }
+        frame(&mut app, &ctx, vec![key(egui::Key::C, egui::Modifiers::NONE)]);
+        assert_eq!(app.compose.as_ref().map(|c| c.body.as_str()), Some("testo"));
         // Recipient completion from the people seen in mail.
         app.contact_query = "luc".into();
         app.run("contacts.search", json!({"query": "luc"}));
