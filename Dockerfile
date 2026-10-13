@@ -10,6 +10,11 @@ WORKDIR /src
 RUN rustup target add wasm32-unknown-unknown \
  && curl -sSL https://github.com/trunk-rs/trunk/releases/download/v0.21.14/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C /usr/local/bin trunk
 COPY . .
+# OAuth clients compiled in (see docs/oauth.md): --build-arg MAILCRAFT_BUILTIN_GOOGLE_CLIENT_ID=… etc.
+ARG MAILCRAFT_BUILTIN_GOOGLE_CLIENT_ID=""
+ARG MAILCRAFT_BUILTIN_GOOGLE_CLIENT_SECRET=""
+ARG MAILCRAFT_BUILTIN_MICROSOFT_CLIENT_ID=""
+ARG MAILCRAFT_BUILTIN_MICROSOFT_CLIENT_SECRET=""
 RUN cargo build --release -p mailcraft-cli \
  && cd apps/mailcraft-web && trunk build --release
 

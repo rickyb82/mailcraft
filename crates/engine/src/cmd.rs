@@ -676,8 +676,10 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
                 .map(|p| {
                     let source = if s.config.oauth.get(p.id).is_some_and(|c| !c.client_id.trim().is_empty()) {
                         "config"
-                    } else if oauth::ClientCredentials::from_env(p.id).is_some() {
+                    } else if std::env::var(format!("MAILCRAFT_{}_CLIENT_ID", p.id.to_ascii_uppercase())).is_ok_and(|v| !v.trim().is_empty()) {
                         "env"
+                    } else if oauth::ClientCredentials::builtin(p.id).is_some() {
+                        "builtin"
                     } else {
                         ""
                     };

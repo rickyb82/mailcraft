@@ -1,6 +1,6 @@
 //! Renders the UI offscreen to a PNG with a small software rasteriser: no window, no GPU.
 //!
-//! `cargo run -p mailcraft-ui-egui --example snapshot -- out.png [--dark] [--lang it] [--unified] [--open N] [--compose] [--settings] [--edit] [--search QUERY] [--folder sent|drafts|trash] [--size WxH]`
+//! `cargo run -p mailcraft-ui-egui --example snapshot -- out.png [--dark] [--lang it] [--unified] [--open N] [--compose] [--settings] [--edit] [--add EMAIL] [--search QUERY] [--folder sent|drafts|trash] [--size WxH]`
 //! The demo mailbox (mock backend) is shown; no account or network is needed.
 
 use std::collections::HashMap;
@@ -114,6 +114,11 @@ fn main() {
                 let _ = app.session.run_blocking("mail.list", json!({"account": "*", "refresh": true}));
             }
             "--settings" => app.screen = Screen::Settings,
+            "--add" => {
+                app.screen = Screen::Settings;
+                let email = it.next().cloned().unwrap_or_default();
+                app.settings_add(&email);
+            }
             "--edit" => {
                 app.screen = Screen::Settings;
                 if let Some(a) = app.session.config().accounts.first().cloned() {

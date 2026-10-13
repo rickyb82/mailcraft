@@ -49,7 +49,7 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Sign in with {provider}" => "Accedi con {provider}",
         "Signed in with {provider}" => "Accesso con {provider} attivo",
         "Sign in again" => "Accedi di nuovo",
-        "Configure the {provider} client below first" => "Configura prima il client {provider} qui sotto",
+        "Create the {provider} client first (fields below)" => "Crea prima il client {provider} (campi qui sotto)",
         "Complete the sign-in in the browser, then come back here" => "Completa l'accesso nel browser, poi torna qui",
         "Signed in" => "Accesso riuscito",
         "Sign in with Google or Microsoft 365 (OAuth)" => "Accesso con Google o Microsoft 365 (OAuth)",

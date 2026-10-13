@@ -189,6 +189,12 @@ impl MailApp {
         }
     }
 
+    /// Opens the settings form for a new account with this address.
+    pub fn settings_add(&mut self, email: &str) {
+        self.screen = Screen::Settings;
+        self.settings.editing = Some(settings::AccountForm::from_email(email));
+    }
+
     /// Opens the settings form of an account.
     pub fn settings_edit(&mut self, id: &str) {
         if let Some(a) = self.session.account(id).cloned() {
@@ -882,6 +888,11 @@ mod tests {
         app.dark = true;
         frame(&mut app, &ctx, vec![]);
         app.settings.editing = Some(settings::AccountForm::from_email("anna@gmail.com"));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![]);
+        // A Gmail address gets its servers and "sign in with Google" without typing anything.
+        let f = app.settings.editing.clone().unwrap();
+        assert_eq!((f.imap_host.as_str(), f.auth.as_str()), ("imap.gmail.com", "google"));
         frame(&mut app, &ctx, vec![]);
         frame(&mut app, &ctx, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
         assert_eq!(app.screen, Screen::Mail);

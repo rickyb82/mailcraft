@@ -100,7 +100,7 @@ pub const LABELS: &[&str] = &[
     "Sign in with {provider}",
     "Signed in with {provider}",
     "Sign in again",
-    "Configure the {provider} client below first",
+    "Create the {provider} client first (fields below)",
     "Complete the sign-in in the browser, then come back here",
     "Signed in",
     "Sign in with Google or Microsoft 365 (OAuth)",

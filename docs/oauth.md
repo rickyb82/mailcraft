@@ -9,9 +9,14 @@ code, MailCraft exchanges it for an access token (used as the IMAP/SMTP password
 XOAUTH2 mechanism, renewed automatically) and a refresh token (kept in `secrets.json`, the
 user-only file).
 
-Every provider requires the application to present an *OAuth client*. Thunderbird ships one
-owned by Mozilla; MailCraft is open source and ships none, so you (or whoever runs MailCraft
-for your users) create one in the provider's console. It takes a few minutes and is free.
+Every provider requires the application to present an *OAuth client*. Thunderbird and
+Outlook carry one inside the program (Mozilla's and Microsoft's); they expose no server, the
+browser comes back to `127.0.0.1`, exactly as MailCraft does on the desktop. MailCraft is open
+source and the public repository ships no client, so whoever distributes it registers one
+(a few minutes, free) and either **compiles it in** (then users just press *Sign in with
+Google*) or gives it to the running program. Note that the "secret" of a desktop client is
+not secret in the provider's own terms (the app is public): Thunderbird keeps its own in its
+source code.
 
 ## 1. Create the client
 
@@ -41,7 +46,17 @@ for your users) create one in the provider's console. It takes a few minutes and
 
 ## 2. Give the client to MailCraft
 
-Any of:
+**Compile it in** (what Thunderbird does): build with the variables set, and every copy of
+that build signs in without any configuration:
+
+```sh
+MAILCRAFT_BUILTIN_GOOGLE_CLIENT_ID='1234-abcd.apps.googleusercontent.com' \
+MAILCRAFT_BUILTIN_GOOGLE_CLIENT_SECRET='GOCSPX-…' \
+cargo build --release          # desktop app, CLI, server; the same for MICROSOFT
+docker build --build-arg MAILCRAFT_BUILTIN_GOOGLE_CLIENT_ID=… --build-arg MAILCRAFT_BUILTIN_GOOGLE_CLIENT_SECRET=… .
+```
+
+Or give it to the running program, any of:
 
 - **Settings › Sign in with Google or Microsoft 365**: paste the id and the secret, *Save
   client*.
@@ -49,7 +64,7 @@ Any of:
 - **Assistant (MCP):** "configura il client Google: id … segreto …" (`configure_oauth`).
 - **Environment** (servers, Docker): `MAILCRAFT_GOOGLE_CLIENT_ID`, `MAILCRAFT_GOOGLE_CLIENT_SECRET`,
   `MAILCRAFT_MICROSOFT_CLIENT_ID`, `MAILCRAFT_MICROSOFT_CLIENT_SECRET`. The configuration file
-  wins over the environment.
+  wins over the environment, which wins over the built-in client.
 
 The client is stored in `config.json` under `oauth`; the secret never leaves the machine
 (`oauth.providers` reports whether a client exists, not what it is).

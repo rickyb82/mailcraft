@@ -8,10 +8,15 @@
 //! code is exchanged for an access token (short-lived, used as the IMAP/SMTP password with the
 //! XOAUTH2 mechanism) and a refresh token (kept in the secrets file).
 //!
-//! Every provider requires an OAuth *client* registered by whoever ships the app. MailCraft is
-//! open source and ships none: the person (or the framework operator) creates one in the
-//! provider's console and gives MailCraft its id and secret (`oauth.configure`, or the
-//! `MAILCRAFT_GOOGLE_CLIENT_ID` / `MAILCRAFT_GOOGLE_CLIENT_SECRET` environment variables).
+//! Every provider requires an OAuth *client* registered by whoever ships the app. Thunderbird
+//! and Outlook carry theirs inside the program; MailCraft does the same when it is built with
+//! `MAILCRAFT_BUILTIN_GOOGLE_CLIENT_ID` / `..._SECRET` (and the `MICROSOFT` pair) set, so a
+//! distribution's users just press "Sign in with Google". Without a built-in client, the
+//! person (or the framework operator) creates one in the provider's console and gives
+//! MailCraft its id and secret (`oauth.configure`, or the `MAILCRAFT_GOOGLE_CLIENT_ID` /
+//! `MAILCRAFT_GOOGLE_CLIENT_SECRET` environment variables at run time). The secret of a
+//! "desktop" client is not a secret in the provider's own terms (the app is public), which is
+//! why Thunderbird keeps it in its source.
 
 use std::collections::BTreeMap;
 
@@ -85,12 +90,30 @@ pub struct ClientCredentials {
 }
 
 impl ClientCredentials {
-    /// The client from the environment (`MAILCRAFT_GOOGLE_CLIENT_ID`…), for servers and Docker.
+    /// The client from the environment (`MAILCRAFT_GOOGLE_CLIENT_ID`…) for servers and Docker,
+    /// else the one compiled into this build ([`ClientCredentials::builtin`]).
     pub fn from_env(provider: &str) -> Option<Self> {
         let key = provider.to_ascii_uppercase();
-        let client_id = std::env::var(format!("MAILCRAFT_{key}_CLIENT_ID")).ok().filter(|v| !v.trim().is_empty())?;
-        let client_secret = std::env::var(format!("MAILCRAFT_{key}_CLIENT_SECRET")).unwrap_or_default();
-        Some(Self { client_id: clip(client_id.trim(), 500).to_string(), client_secret: clip(client_secret.trim(), 500).to_string() })
+        match std::env::var(format!("MAILCRAFT_{key}_CLIENT_ID")).ok().filter(|v| !v.trim().is_empty()) {
+            Some(client_id) => {
+                let client_secret = std::env::var(format!("MAILCRAFT_{key}_CLIENT_SECRET")).unwrap_or_default();
+                Some(Self { client_id: clip(client_id.trim(), 500).to_string(), client_secret: clip(client_secret.trim(), 500).to_string() })
+            }
+            None => Self::builtin(provider),
+        }
+    }
+
+    /// The client compiled into this build (`MAILCRAFT_BUILTIN_GOOGLE_CLIENT_ID` and
+    /// `MAILCRAFT_BUILTIN_GOOGLE_CLIENT_SECRET` at build time; the same for `MICROSOFT`): what
+    /// lets a distribution's users sign in without creating a client themselves.
+    pub fn builtin(provider: &str) -> Option<Self> {
+        let (id, secret) = match provider {
+            "google" => (option_env!("MAILCRAFT_BUILTIN_GOOGLE_CLIENT_ID"), option_env!("MAILCRAFT_BUILTIN_GOOGLE_CLIENT_SECRET")),
+            "microsoft" => (option_env!("MAILCRAFT_BUILTIN_MICROSOFT_CLIENT_ID"), option_env!("MAILCRAFT_BUILTIN_MICROSOFT_CLIENT_SECRET")),
+            _ => (None, None),
+        };
+        let id = id.map(str::trim).filter(|v| !v.is_empty())?;
+        Some(Self { client_id: id.to_string(), client_secret: secret.map(str::trim).unwrap_or_default().to_string() })
     }
 }
 
