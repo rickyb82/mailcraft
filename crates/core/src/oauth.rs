@@ -137,15 +137,24 @@ impl Tokens {
 
     /// Reads a token endpoint answer; keeps `old_refresh` when the provider sends no new one.
     pub fn from_response(v: &Value, old_refresh: &str, now: i64) -> Result<Self> {
-        if let Some(e) = v.get("error").and_then(Value::as_str) {
-            let detail = v.get("error_description").and_then(Value::as_str).unwrap_or("");
-            return Err(Error::Auth(format!("OAuth: {e} {detail}").trim().to_string()));
+        match v.get("error") {
+            Some(Value::String(e)) => {
+                let detail = v.get("error_description").and_then(Value::as_str).unwrap_or("");
+                return Err(Error::Auth(format!("OAuth: {e} {detail}").trim().to_string()));
+            }
+            Some(Value::Object(o)) => {
+                let message = o.get("message").and_then(Value::as_str).unwrap_or("");
+                let status = o.get("status").and_then(Value::as_str).unwrap_or("");
+                return Err(Error::Auth(format!("OAuth: {status} {message}").trim().to_string()));
+            }
+            _ => {}
         }
+        // An answer without a token is reported with what it said (no token is in it).
         let access_token = v
             .get("access_token")
             .and_then(Value::as_str)
             .filter(|t| !t.is_empty())
-            .ok_or_else(|| Error::Auth("OAuth: no access token in the answer".into()))?;
+            .ok_or_else(|| Error::Auth(format!("OAuth: no access token in the answer: {}", clip(&v.to_string(), 400))))?;
         let refresh_token = v.get("refresh_token").and_then(Value::as_str).filter(|t| !t.is_empty()).unwrap_or(old_refresh);
         let expires_in = v.get("expires_in").and_then(Value::as_i64).unwrap_or(3600).clamp(60, 86_400 * 30);
         Ok(Self {
@@ -381,7 +390,15 @@ mod tests {
         let t = Tokens::from_response(&serde_json::json!({"access_token": "x", "expires_in": 3599}), "old", 1000).unwrap();
         assert_eq!((t.access_token.as_str(), t.refresh_token.as_str(), t.expires_at), ("x", "old", 4599));
         assert!(!t.expired(1000) && t.expired(4540));
-        assert!(Tokens::from_response(&serde_json::json!({"error": "invalid_grant", "error_description": "expired"}), "", 0).is_err());
+        assert_eq!(
+            Tokens::from_response(&serde_json::json!({"error": "invalid_grant", "error_description": "expired"}), "", 0).unwrap_err().to_string(),
+            "login failed: OAuth: invalid_grant expired"
+        );
+        let e =
+            Tokens::from_response(&serde_json::json!({"error": {"status": "PERMISSION_DENIED", "message": "nope"}}), "", 0).unwrap_err().to_string();
+        assert_eq!(e, "login failed: OAuth: PERMISSION_DENIED nope");
+        let e = Tokens::from_response(&serde_json::json!({"message": "blocked by proxy"}), "", 0).unwrap_err().to_string();
+        assert!(e.contains("blocked by proxy"), "{e}");
         let q = parse_callback("?code=4%2FabC&state=s1&scope=https%3A%2F%2Fmail.google.com%2F");
         assert_eq!((q["code"].as_str(), q["state"].as_str()), ("4/abC", "s1"));
         assert_eq!(url_decode("a+b%zz"), "a b%zz");

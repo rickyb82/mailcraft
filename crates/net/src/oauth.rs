@@ -14,9 +14,12 @@ impl HttpBroker {
         req.headers.insert("Content-Type", "application/x-www-form-urlencoded");
         req.headers.insert("Accept", "application/json");
         let resp = ehttp::fetch_blocking(&req).map_err(|e| Error::Connect(format!("OAuth token endpoint: {e}")))?;
-        let v: serde_json::Value =
-            serde_json::from_slice(&resp.bytes).map_err(|_| Error::Auth(format!("OAuth token endpoint answered {} without JSON", resp.status)))?;
+        let v: serde_json::Value = serde_json::from_slice(&resp.bytes).map_err(|_| {
+            let body = String::from_utf8_lossy(&resp.bytes);
+            Error::Auth(format!("OAuth token endpoint answered {} without JSON: {}", resp.status, mailcraft_core::clip(body.trim(), 300)))
+        })?;
         Tokens::from_response(&v, old_refresh, mailcraft_core::message::time::now())
+            .map_err(|e| if resp.ok { e } else { Error::Auth(format!("{e} (HTTP {})", resp.status)) })
     }
 }
 
