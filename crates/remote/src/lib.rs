@@ -191,7 +191,7 @@ impl MailSession for RemoteSession {
     fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
         let body = json!({"command": id, "params": params}).to_string().into_bytes();
         let mut req = ehttp::Request::post(format!("{}/api/cmd", self.base), body);
-        req.headers.insert("Content-Type", "application/json");
+        req.headers = ehttp::Headers::new(&[("Accept", "application/json"), ("Content-Type", "application/json")]);
         let req = self.request(req);
         let inbox = self.inbox.clone();
         let command = id.to_string();
@@ -283,7 +283,7 @@ impl MailSession for RemoteSession {
     fn run_blocking(&mut self, id: &str, params: Value) -> Result<Value> {
         let body = json!({"command": id, "params": params}).to_string().into_bytes();
         let mut req = ehttp::Request::post(format!("{}/api/cmd", self.base), body);
-        req.headers.insert("Content-Type", "application/json");
+        req.headers = ehttp::Headers::new(&[("Accept", "application/json"), ("Content-Type", "application/json")]);
         let req = self.request(req);
         let r = ehttp::fetch_blocking(&req).map_err(|e| Error::Core(mailcraft_engine::core::Error::Connect(e)))?;
         let v: Value = serde_json::from_slice(&r.bytes).map_err(|e| Error::Param(format!("bad answer: {e}")))?;
