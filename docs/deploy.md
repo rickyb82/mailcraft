@@ -90,6 +90,15 @@ the user's state (folders, the mailbox in view, opened messages, finished jobs) 
 
 ## Gmail and Microsoft 365 (OAuth)
 
+The providers accept a redirect URI only on **HTTPS with a host name** (or on `localhost`,
+which works only for someone sitting on the server itself): `http://192.168.10.80:8080/…`
+is refused by Google with "device_id and device_name are required for private IP". So a
+framework on a LAN needs a name and a certificate in front of MailCraft (a reverse proxy with
+Let's Encrypt on a real domain, or an internal CA your browsers trust), and MailCraft must
+know that address: set `MAILCRAFT_PUBLIC_URL=https://mail.example.com` so every user's
+sign-in returns there whatever address they typed. MailCraft refuses to start a sign-in whose
+return address a provider would reject, and says why.
+
 Create a *Web application* OAuth client for each provider with the redirect URI
 `https://mail.example.com/api/oauth/callback` and give it to the container:
 `MAILCRAFT_GOOGLE_CLIENT_ID`, `MAILCRAFT_GOOGLE_CLIENT_SECRET` (and the `MICROSOFT` pair). Set

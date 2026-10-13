@@ -330,6 +330,31 @@ impl OAuthBroker for MockBroker {
 /// The map of configured clients by provider id, as the configuration keeps it.
 pub type Clients = BTreeMap<String, ClientCredentials>;
 
+/// Why a provider will refuse this redirect URL, if it will: Google and Microsoft take
+/// `http://` only on `localhost`/`127.0.0.1`, and never a private IP address (a framework on a
+/// LAN needs a host name with HTTPS and `MAILCRAFT_PUBLIC_URL`).
+pub fn redirect_problem(redirect: &str) -> Option<String> {
+    let (scheme, rest) = redirect.split_once("://")?;
+    let host = rest.split(['/', '?', '#']).next().unwrap_or("").rsplit('@').next().unwrap_or("");
+    let host = host.trim_start_matches('[').split([']', ':']).next().unwrap_or("").to_ascii_lowercase();
+    let local = host == "localhost" || host == "127.0.0.1" || host == "::1" || host.ends_with(".localhost");
+    if local {
+        return None;
+    }
+    let is_ip = host.split('.').count() == 4 && host.split('.').all(|p| p.parse::<u8>().is_ok()) || host.contains(':');
+    if is_ip {
+        return Some(format!(
+            "the providers refuse a redirect on an IP address ({host}): reach the server through a host name with HTTPS and set MAILCRAFT_PUBLIC_URL (or --public-url) to it; only localhost works without"
+        ));
+    }
+    if scheme.eq_ignore_ascii_case("http") {
+        return Some(format!(
+            "the providers take http:// redirects only on localhost ({host} must be https): put HTTPS in front of the server and set MAILCRAFT_PUBLIC_URL (or --public-url) to https://{host}"
+        ));
+    }
+    None
+}
+
 /// `application/x-www-form-urlencoded`.
 pub fn form(params: &[(&str, &str)]) -> String {
     params.iter().map(|(k, v)| format!("{}={}", url_encode(k), url_encode(v))).collect::<Vec<_>>().join("&")
@@ -449,6 +474,11 @@ mod tests {
         assert!(google.apply_servers(&mut a));
         assert_eq!((a.imap.host.as_str(), a.smtp.host.as_str(), a.smtp.port), ("imap.gmail.com", "smtp.gmail.com", 465));
         assert!(!google.apply_servers(&mut a), "already there");
+        assert!(redirect_problem("http://127.0.0.1:4242/").is_none());
+        assert!(redirect_problem("http://localhost:8080/mailcraft/api/oauth/callback").is_none());
+        assert!(redirect_problem("https://mail.example.it/api/oauth/callback").is_none());
+        assert!(redirect_problem("http://192.168.10.80:8080/mailcraft/api/oauth/callback").unwrap().contains("IP address"));
+        assert!(redirect_problem("http://emily.lan:8080/api/oauth/callback").unwrap().contains("https"));
         let mock = MockBroker::default();
         assert_eq!(mock.exchange(google, &client, "c", "v", "r").unwrap().access_token, "access-c");
         assert!(mock.exchange(google, &client, "bad", "v", "r").is_err());

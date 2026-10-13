@@ -1195,6 +1195,9 @@ mod tests {
         assert!(redirect.starts_with("http://127.0.0.1:"), "{redirect}");
         let state = v["state"].as_str().unwrap().to_string();
         assert!(s.execute("account.oauthFinish", &json!({"state": "nope", "code": "x"})).is_err());
+        let e =
+            s.execute("account.oauthStart", &json!({"id": id, "redirect": "http://192.168.1.5:8080/api/oauth/callback"})).unwrap_err().to_string();
+        assert!(e.contains("MAILCRAFT_PUBLIC_URL"), "{e}");
         assert!(s.execute("account.oauthFinish", &json!({"state": state, "error": "access_denied"})).unwrap_err().to_string().contains("refused"));
         // The browser comes back through the loopback listener; pump finishes the sign-in.
         let v = s.execute("account.oauthStart", &json!({"id": id})).unwrap();

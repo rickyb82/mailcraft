@@ -648,7 +648,12 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
                 s.save_config()?;
             }
             let redirect = match p::opt_str(prm, "redirect").filter(|r| !r.is_empty()) {
-                Some(r) => r.to_string(),
+                Some(r) => {
+                    if let Some(why) = oauth::redirect_problem(r) {
+                        return Err(Error::Param(format!("sign-in cannot return to {r}: {why}")));
+                    }
+                    r.to_string()
+                }
                 None => s.loopback_redirect()?,
             };
             let (flow, url) = oauth::start(provider, &client, &id, &account.email, &redirect);

@@ -90,6 +90,12 @@ How the browser comes back:
 The callback carries the flow's `state`; only the session that started that flow accepts it,
 so no token is needed on that route.
 
+The providers accept the return address only on `localhost` or on **HTTPS with a host name**:
+never a private IP, never plain `http://` on a name. A framework reached as
+`http://192.168.x.y:8080` therefore needs a name with a certificate in front of it and
+`MAILCRAFT_PUBLIC_URL=https://that-name`; MailCraft refuses to start such a sign-in and says
+so, instead of sending the browser to an error page at Google.
+
 ## Commands and tools
 
 | Command | Tool | What it does |

@@ -615,8 +615,23 @@ mod tests {
         // OAuth through the server: the redirect is the server's own callback (from the Host
         // header), which finishes the flow of the session that started it, without a token.
         post(&addr, "/api/cmd", r#"{"command": "oauth.configure", "params": {"provider": "google", "client_id": "cid"}}"#);
+        // A plain http name is refused (the providers would), an https one behind a proxy works.
         let v = post(&addr, "/api/cmd", r#"{"command": "account.oauthStart", "params": {"id": "demo", "provider": "google"}}"#);
-        assert_eq!(v["result"]["redirect"], "http://x/api/oauth/callback", "{v}");
+        assert!(v["error"].as_str().expect("refused").contains("MAILCRAFT_PUBLIC_URL"), "{v}");
+        let body = r#"{"command": "account.oauthStart", "params": {"id": "demo", "provider": "google"}}"#;
+        let mut c = TcpStream::connect(&addr).expect("connect");
+        c.write_all(
+            format!(
+                "POST /api/cmd HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer t0k\r\nX-Forwarded-Proto: https\r\nX-Forwarded-Host: mail.example.it\r\nX-Forwarded-Prefix: /mailcraft\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .expect("write");
+        let mut out = String::new();
+        c.read_to_string(&mut out).expect("read");
+        let v: Value = serde_json::from_str(out.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("null")).unwrap_or(Value::Null);
+        assert_eq!(v["result"]["redirect"], "https://mail.example.it/mailcraft/api/oauth/callback", "{v}");
         let state = v["result"]["state"].as_str().expect("state").to_string();
         let (status, _) = get(&addr, "/api/oauth/callback?state=nope&code=x", "");
         assert!(status.contains("200"));
