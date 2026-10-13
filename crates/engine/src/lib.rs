@@ -359,9 +359,24 @@ impl Session {
             color: "#4a6cf7".into(),
             ..Account::default()
         };
+        let work = Account {
+            id: "lavoro".into(),
+            name: "Lavoro".into(),
+            email: "riccardo@sirius-example.it".into(),
+            display_name: "Riccardo Burrai".into(),
+            imap: mailcraft_core::account::Server::new("mock.local", 993, mailcraft_core::account::Security::Tls),
+            smtp: mailcraft_core::account::Server::new("mock.local", 465, mailcraft_core::account::Security::Tls),
+            color: "#22a06b".into(),
+            ..Account::default()
+        };
         if s.config.upsert(account).is_ok() {
             s.secrets.set_password("demo", "demo");
             s.store.insert("demo".into(), AccountState::default());
+            // A second account, to switch between them like on Gmail (same demo mailbox).
+            if s.config.upsert(work).is_ok() {
+                s.secrets.set_password("lavoro", "demo");
+                s.store.insert("lavoro".into(), AccountState::default());
+            }
             s.view.account = "demo".into();
             s.view.mailbox = "INBOX".into();
             let _ = s.run_blocking("mail.sync", json!({}));

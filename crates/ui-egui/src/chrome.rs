@@ -98,13 +98,12 @@ pub fn top_bar(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                // Account chip.
+                // Account chip: click for the Gmail-style account switcher.
                 let account = app.session.view().account.clone();
                 if let Some(a) = app.session.account(&account).cloned() {
                     let color = color_for(&a.email, &a.color);
-                    if avatar(ui, t, &a.name, color, 30.0).on_hover_text(format!("{} <{}>", a.name, a.email)).clicked() {
-                        app.screen = Screen::Settings;
-                    }
+                    let chip = avatar(ui, t, &a.name, color, 30.0).on_hover_text(format!("{} <{}>", a.name, a.email));
+                    account_menu(app, &chip, t);
                     ui.label(RichText::new(&a.name).color(t.muted));
                     ui.add_space(6.0);
                 }
@@ -135,6 +134,69 @@ pub fn top_bar(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 }
             });
         });
+    });
+}
+
+/// The account switcher under the avatar: every account with its unread count, then
+/// "Add account" and "Settings".
+fn account_menu(app: &mut MailApp, chip: &egui::Response, t: &Tokens) {
+    let current = app.session.view().account.clone();
+    let accounts: Vec<(String, String, String, String, u32)> = app
+        .session
+        .config()
+        .accounts
+        .iter()
+        .map(|a| {
+            (
+                a.id.clone(),
+                a.name.clone(),
+                a.email.clone(),
+                a.color.clone(),
+                app.session.state(&a.id).and_then(|s| s.by_role(mailcraft_engine::core::mailbox::Role::Inbox)).map_or(0, |m| m.unread),
+            )
+        })
+        .collect();
+    egui::Popup::menu(chip).show(|ui| {
+        ui.set_min_width(260.0);
+        for (id, name, email, color, unread) in accounts {
+            let active = id == current;
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+            if active {
+                ui.painter().rect_filled(rect, 8.0, t.active);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(rect, 8.0, t.hover);
+            }
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 4.0))).layout(Layout::left_to_right(Align::Center)));
+            avatar(&mut child, t, &name, color_for(&email, &color), 30.0);
+            child.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new(&name).color(if active { t.accent } else { t.ui_text }));
+                ui.label(RichText::new(&email).small().color(t.muted));
+            });
+            if unread > 0 {
+                ui.painter().text(
+                    rect.right_center() - vec2(10.0, 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    unread.to_string(),
+                    FontId::proportional(12.0),
+                    t.muted,
+                );
+            }
+            if resp.clicked() {
+                app.select_account(&id);
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui.button(format!("+ {}", app.tr("Add account"))).clicked() {
+            app.screen = Screen::Settings;
+            app.settings.editing = Some(crate::settings::AccountForm::from_email(""));
+            ui.close();
+        }
+        if ui.button(app.tr("Settings")).clicked() {
+            app.screen = Screen::Settings;
+            ui.close();
+        }
     });
 }
 

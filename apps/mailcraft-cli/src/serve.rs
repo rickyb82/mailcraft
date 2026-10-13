@@ -569,7 +569,7 @@ mod tests {
         let rev = snap["revision"].as_u64().expect("revision");
         assert_eq!(snap["view"]["account"], "demo");
         assert!(snap["states"]["demo"]["envelopes"]["INBOX"].as_array().expect("inbox").len() > 5);
-        assert!(snap.to_string().contains("\"passwords\":[\"demo\"]"));
+        assert!(snap.to_string().contains("\"passwords\":[\"demo\",\"lavoro\"]"));
         assert!(!snap.to_string().contains("\"demo\"}") || true);
         let (_, same) = get(&addr, &format!("/api/snapshot?since={rev}"), "t0k");
         assert_eq!(same["unchanged"], true);
@@ -736,7 +736,7 @@ mod multi_user_tests {
             )
             .expect("reply");
         assert_eq!(r["result"]["isError"], true, "a failing command reports its error: {r}");
-        assert!(mcp.session().config().accounts.len() == 1);
+        assert_eq!(mcp.session().config().accounts.len(), 2);
         // Revocation.
         let (_, rev) = call(&addr, "POST", "/api/users/anna-rossi/revoke", "Authorization: Bearer svc\r\n", "");
         assert_eq!(rev["revoked"], 1);
