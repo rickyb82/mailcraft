@@ -11,10 +11,8 @@ repository.workspace = true
 mailcraft-engine = { workspace = true }
 mailcraft-net = { workspace = true }
 mailcraft-mcp = { workspace = true }
+mailcraft-remote = { workspace = true }
 serde_json = { workspace = true }
 
 [lints]
 workspace = true
-
-[dev-dependencies]
-mailcraft-remote = { workspace = true }

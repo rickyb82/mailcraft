@@ -52,8 +52,12 @@ in the browser it is `RemoteSession`, which sends commands to `mailcraft-cli ser
 (never passwords: only which accounts have one), the view, every account's folders with counts,
 the envelopes and the opened messages (as text) of the mailbox in view, and the jobs completed
 since the client's revision, so toasts and form follow-ups (`account.suggest`, `account.add`,
-`mail.attachment`) work the same way as locally. The server keeps one `Session`, pumps it on a
-background thread, and refuses to bind beyond localhost without a token.
+`mail.attachment`) work the same way as locally. The server keeps one `Session` per user (one
+in single-user mode), pumps them on a background thread, and refuses to bind beyond localhost
+without a token. In multi-user mode (`--users-dir`) the framework's service token names the
+user (`X-Mailcraft-User`) and mints per-user tokens (`POST /api/users/<user>/token`); the MCP
+server can run for one user over the network (`mailcraft-cli mcp --server URL --token T`) through
+`RemoteSession::run_blocking` (native only). See `docs/deploy.md`.
 
 ## Interface
 

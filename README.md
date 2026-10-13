@@ -71,6 +71,13 @@ the server on a machine of yours behind an HTTPS reverse proxy with
 `mailcraft-cli serve --bind 0.0.0.0:7878 --token SECRET` and open the page with `?token=SECRET`.
 `mailcraft-cli serve --demo` shows the built-in mailbox.
 
+### In a framework, for many users (Docker)
+
+`docker compose up -d` with `MAILCRAFT_TOKEN` set runs a multi-user server: one mailbox client
+per user of your framework, data per user under `/data/users/<user>/`, per-user tokens for the
+web page and for a per-user MCP assistant (`mailcraft-cli mcp --server URL --token T`). See
+[docs/deploy.md](docs/deploy.md).
+
 ### Desktop app
 
 ```sh

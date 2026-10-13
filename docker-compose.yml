@@ -1,0 +1,15 @@
+# MailCraft behind your framework: `MAILCRAFT_TOKEN=... docker compose up -d`
+services:
+  mailcraft:
+    build: .
+    image: mailcraft
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7878:7878"   # put an HTTPS reverse proxy (or the framework) in front
+    environment:
+      MAILCRAFT_TOKEN: ${MAILCRAFT_TOKEN:?set the service token}
+      MAILCRAFT_LANG: it
+    volumes:
+      - mailcraft-data:/data
+volumes:
+  mailcraft-data:

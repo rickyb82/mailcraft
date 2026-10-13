@@ -22,6 +22,9 @@
 - Web app (WebAssembly, GitHub Pages) on top of `mailcraft-cli serve`: the engine's state is
   mirrored by revision over a tiny HTTP API, commands run on the server, attachments go through
   the browser's picker and downloads; token-protected when bound beyond localhost.
+- Multi-user server (`--users-dir`): a session and a data directory per user, a service token
+  for the framework (`X-Mailcraft-User`), per-user tokens minted by the framework for the page
+  and the user's MCP process (`mailcraft-cli mcp --server URL --token T`), Docker image.
 
 ## Next (0.2)
 
@@ -44,3 +47,4 @@
 |---|---|
 | 2026-10-13 | 0.1: model, autoconfig, IMAP/SMTP transport with in-process test servers, engine with commands and cache, Gmail-style egui UI, MCP server with configuration prompts, CLI |
 | 2026-10-13 | Web app: `MailSession` abstraction, snapshots by revision, `mailcraft-remote`, `mailcraft-cli serve` (HTTP API, static files, token), `apps/mailcraft-web` on GitHub Pages |
+| 2026-10-13 | Multi-user server for frameworks: `--users-dir`, service and per-user tokens, `/api/users`, MCP over the server (`mcp --server`), Dockerfile and compose, deploy guide |

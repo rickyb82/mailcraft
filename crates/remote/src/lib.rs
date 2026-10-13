@@ -117,6 +117,23 @@ impl RemoteSession {
         });
     }
 
+    /// Fetches and applies the snapshot now (native only); `None` when unchanged.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn refresh_blocking(&mut self) -> Result<Option<Snapshot>> {
+        let req = self.request(ehttp::Request::get(format!("{}/api/snapshot?since={}", self.base, self.revision)));
+        let r = ehttp::fetch_blocking(&req).map_err(|e| Error::Core(mailcraft_engine::core::Error::Connect(e)))?;
+        if !r.ok {
+            return Err(Error::Core(mailcraft_engine::core::Error::Server(format!("server answered {} {}", r.status, r.status_text))));
+        }
+        let v: Value = serde_json::from_slice(&r.bytes).map_err(|e| Error::Param(format!("bad snapshot: {e}")))?;
+        if v.get("unchanged").is_some() {
+            return Ok(None);
+        }
+        let s: Snapshot = serde_json::from_value(v).map_err(|e| Error::Param(format!("bad snapshot: {e}")))?;
+        self.apply(s.clone());
+        Ok(Some(s))
+    }
+
     fn apply(&mut self, s: Snapshot) {
         self.revision = s.revision;
         self.config = s.config;
@@ -246,10 +263,53 @@ impl MailSession for RemoteSession {
         out
     }
 
+    #[cfg(target_arch = "wasm32")]
     fn run_blocking(&mut self, id: &str, params: Value) -> Result<Value> {
         // A remote session cannot block the browser's thread: callers use pump().
         let _ = self.execute(id, &params)?;
         Err(Error::Param("remote sessions answer through pump(), not run_blocking".into()))
+    }
+
+    /// Native clients (the MCP server with `--server`) can wait: the command goes out with a
+    /// blocking request and the snapshot is polled until its jobs complete.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run_blocking(&mut self, id: &str, params: Value) -> Result<Value> {
+        let body = json!({"command": id, "params": params}).to_string().into_bytes();
+        let mut req = ehttp::Request::post(format!("{}/api/cmd", self.base), body);
+        req.headers.insert("Content-Type", "application/json");
+        let req = self.request(req);
+        let r = ehttp::fetch_blocking(&req).map_err(|e| Error::Core(mailcraft_engine::core::Error::Connect(e)))?;
+        let v: Value = serde_json::from_slice(&r.bytes).map_err(|e| Error::Param(format!("bad answer: {e}")))?;
+        if let Some(e) = v.get("error").and_then(Value::as_str) {
+            return Err(Error::Param(e.to_string()));
+        }
+        let v = v.get("result").cloned().unwrap_or(Value::Null);
+        let mut jobs: Vec<u64> = v.get("jobs").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+        jobs.extend(v.get("job").and_then(Value::as_u64));
+        if jobs.is_empty() {
+            self.refresh_blocking()?;
+            return Ok(v);
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let mut last = v;
+        let mut remaining = jobs;
+        while !remaining.is_empty() {
+            if std::time::Instant::now() > deadline {
+                return Err(Error::Timeout(remaining[0]));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let Some(s) = self.refresh_blocking()? else { continue };
+            for c in &s.completed {
+                if let Some(i) = remaining.iter().position(|j| *j == c.job) {
+                    remaining.remove(i);
+                    if !c.error.is_empty() {
+                        return Err(Error::Param(c.error.clone()));
+                    }
+                    last = c.result.clone();
+                }
+            }
+        }
+        Ok(last)
     }
 }
 

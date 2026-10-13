@@ -11,7 +11,7 @@
 use std::io::{BufRead, Write};
 
 use mailcraft_engine::core::message::time;
-use mailcraft_engine::{COMMANDS, Paths, Session};
+use mailcraft_engine::{COMMANDS, MailSession, Paths, Session};
 use serde_json::{Value, json};
 
 /// MCP protocol revision this server prefers.
@@ -39,7 +39,7 @@ type ToolResult = Result<Value, String>;
 
 /// The server: one engine session on the user's configuration.
 pub struct Server {
-    session: Session,
+    session: Box<dyn MailSession>,
 }
 
 fn tools() -> Value {
@@ -295,8 +295,8 @@ impl Default for Server {
 }
 
 impl Server {
-    pub fn new(session: Session) -> Self {
-        Self { session }
+    pub fn new(session: impl MailSession + 'static) -> Self {
+        Self { session: Box::new(session) }
     }
 
     /// A server on the user's configuration with the given transport factory.
@@ -304,8 +304,8 @@ impl Server {
         Self::new(Session::new(factory, paths))
     }
 
-    pub fn session(&self) -> &Session {
-        &self.session
+    pub fn session(&self) -> &dyn MailSession {
+        self.session.as_ref()
     }
 
     fn run(&mut self, command: &str, params: Value) -> ToolResult {

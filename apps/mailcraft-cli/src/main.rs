@@ -2,7 +2,8 @@
 //!
 //! ```text
 //! mailcraft-cli mcp [--demo]                        # MCP server on stdio, for AI agents
-//! mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open]   # the web app's server
+//! mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open] [--users-dir DIR]   # the web app's server
+//! mailcraft-cli mcp --server URL --token T                # MCP for one user of a multi-user server
 //! mailcraft-cli accounts                            # configured accounts and their status
 //! mailcraft-cli suggest EMAIL [--lang it]           # IMAP/SMTP settings for an address
 //! mailcraft-cli add EMAIL [--password PW] [--name N] [--imap host:port[:tls|starttls|none]] [--smtp host:port[:sec]] [--no-test]
@@ -32,7 +33,8 @@ use serde_json::{Value, json};
 
 const USAGE: &str = "Usage:
   mailcraft-cli mcp [--demo]
-  mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open]
+  mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open] [--users-dir DIR]
+  mailcraft-cli mcp --server URL --token USER_TOKEN
   mailcraft-cli accounts
   mailcraft-cli suggest EMAIL [--lang it]
   mailcraft-cli add EMAIL [--password PW] [--name N] [--imap host:port[:sec]] [--smtp host:port[:sec]] [--no-test]
@@ -142,7 +144,11 @@ fn run(raw: &[String]) -> Result<(), String> {
     let rest = |n: usize| o.args.get(n..).map(|s| s.to_vec()).unwrap_or_default();
     match args.first().copied() {
         Some("mcp") => {
-            let mut server = mailcraft_mcp::Server::new(session(&o));
+            let tail = rest(1);
+            let mut server = match flag(&tail, "--server") {
+                Some(url) => mailcraft_mcp::Server::new(mailcraft_remote::RemoteSession::new(&url, &flag(&tail, "--token").unwrap_or_default())),
+                None => mailcraft_mcp::Server::new(session(&o)),
+            };
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             server.serve(stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
@@ -157,9 +163,12 @@ fn run(raw: &[String]) -> Result<(), String> {
                 session(&o),
                 serve::Options {
                     bind: flag(&tail, "--bind").unwrap_or_else(|| "127.0.0.1:7878".into()),
-                    token: flag(&tail, "--token").filter(|t| t != "true").unwrap_or_default(),
+                    token: flag(&tail, "--token").filter(|t| t != "true").or_else(|| std::env::var("MAILCRAFT_TOKEN").ok()).unwrap_or_default(),
                     static_dir,
                     open: flag(&tail, "--open").is_some(),
+                    users_dir: flag(&tail, "--users-dir").map(std::path::PathBuf::from),
+                    demo: o.demo,
+                    lang: o.lang.clone(),
                 },
             )
         }

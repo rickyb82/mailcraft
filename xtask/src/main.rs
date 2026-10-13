@@ -14,7 +14,7 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("crates/mcp", &["mailcraft-engine"]),
     ("crates/remote", &["mailcraft-engine"]),
     ("apps/mailcraft", &["mailcraft-ui-egui", "mailcraft-net", "egui", "eframe", "rfd"]),
-    ("apps/mailcraft-cli", &["mailcraft-engine", "mailcraft-net", "mailcraft-mcp"]),
+    ("apps/mailcraft-cli", &["mailcraft-engine", "mailcraft-net", "mailcraft-mcp", "mailcraft-remote"]),
     ("apps/mailcraft-web", &["mailcraft-ui-egui", "mailcraft-remote", "egui", "eframe", "rfd"]),
 ];
 const WATCHED: &[&str] = &[

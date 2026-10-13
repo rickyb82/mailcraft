@@ -472,8 +472,8 @@ impl Secrets {
     }
 }
 
-/// Writes a file readable only by the user, creating the directory.
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+/// Writes a file readable only by the user (0600 on Unix), creating the directory.
+pub fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| Error::Io(format!("{}: {e}", dir.display())))?;
     }
