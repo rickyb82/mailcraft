@@ -3,12 +3,14 @@
 //! configuration of its own.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use mailcraft_core::account::{Account, Server};
 use mailcraft_core::backend::{BackendFactory, FlagChange, MailBackend, Page, SearchQuery};
 use mailcraft_core::mailbox::Mailbox;
 use mailcraft_core::message::{Address, Draft, Envelope, Flags, Message, time};
+use mailcraft_core::oauth::{ClientCredentials, OAuthBroker, Tokens};
 use mailcraft_core::{Error, Result, mime};
 
 /// What a job does.
@@ -81,6 +83,18 @@ pub enum JobKind {
     Subscribe {
         path: String,
         subscribed: bool,
+    },
+    /// Turn an OAuth authorization code into tokens (the provider is the account's).
+    OAuthExchange {
+        client: ClientCredentials,
+        code: String,
+        verifier: String,
+        redirect: String,
+    },
+    /// Renew an OAuth access token.
+    OAuthRefresh {
+        client: ClientCredentials,
+        refresh_token: String,
     },
     /// Connect, list mailboxes and test SMTP with a fresh backend (no state kept).
     Test,
@@ -156,6 +170,8 @@ pub enum Output {
         path: String,
         subscribed: bool,
     },
+    /// New OAuth tokens for the account.
+    Tokens(Tokens),
     Tested {
         mailboxes: usize,
         smtp: Result<()>,
@@ -190,10 +206,10 @@ struct Slot {
 }
 
 impl Worker {
-    pub fn start(factory: BackendFactory) -> Self {
+    pub fn start(factory: BackendFactory, broker: Arc<dyn OAuthBroker>) -> Self {
         let (job_tx, job_rx) = channel::<Job>();
         let (ev_tx, ev_rx) = channel::<Event>();
-        std::thread::Builder::new().name("mailcraft-worker".into()).spawn(move || run(factory, job_rx, ev_tx)).ok();
+        std::thread::Builder::new().name("mailcraft-worker".into()).spawn(move || run(factory, broker, job_rx, ev_tx)).ok();
         Self { tx: job_tx, rx: ev_rx }
     }
 
@@ -211,13 +227,24 @@ impl Worker {
     }
 }
 
-fn run(factory: BackendFactory, jobs: Receiver<Job>, events: Sender<Event>) {
+fn run(factory: BackendFactory, broker: Arc<dyn OAuthBroker>, jobs: Receiver<Job>, events: Sender<Event>) {
     let mut slots: HashMap<String, Slot> = HashMap::new();
-    while let Ok(job) = jobs.recv() {
+    // Access tokens obtained here, so that jobs queued with an older token use the new one.
+    let mut tokens: HashMap<String, String> = HashMap::new();
+    while let Ok(mut job) = jobs.recv() {
         let account_id = job.account.id.clone();
         let kind = job.kind.clone();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&factory, &mut slots, &job)))
+        if job.account.oauth_provider().is_some()
+            && let Some(t) = tokens.get(&account_id)
+            && !matches!(job.kind, JobKind::OAuthExchange { .. } | JobKind::OAuthRefresh { .. })
+        {
+            job.password = t.clone();
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| execute(&factory, broker.as_ref(), &mut slots, &job)))
             .unwrap_or_else(|_| Err(Error::Server("the mail transport failed unexpectedly".into())));
+        if let Ok(Output::Tokens(t)) = &result {
+            tokens.insert(account_id.clone(), t.access_token.clone());
+        }
         if let Err(Error::NotConnected | Error::Connect(_)) = &result
             && let Some(slot) = slots.get_mut(&account_id)
         {
@@ -247,8 +274,16 @@ fn slot<'a>(factory: &BackendFactory, slots: &'a mut HashMap<String, Slot>, acco
     Ok(slot)
 }
 
-fn execute(factory: &BackendFactory, slots: &mut HashMap<String, Slot>, job: &Job) -> Result<Output> {
+fn execute(factory: &BackendFactory, broker: &dyn OAuthBroker, slots: &mut HashMap<String, Slot>, job: &Job) -> Result<Output> {
     match &job.kind {
+        JobKind::OAuthExchange { client, code, verifier, redirect } => {
+            let provider = job.account.oauth_provider().ok_or_else(|| Error::Auth("the account does not sign in with OAuth".into()))?;
+            return Ok(Output::Tokens(broker.exchange(provider, client, code, verifier, redirect)?));
+        }
+        JobKind::OAuthRefresh { client, refresh_token } => {
+            let provider = job.account.oauth_provider().ok_or_else(|| Error::Auth("the account does not sign in with OAuth".into()))?;
+            return Ok(Output::Tokens(broker.refresh(provider, client, refresh_token)?));
+        }
         JobKind::Disconnect => {
             if let Some(mut s) = slots.remove(&job.account.id) {
                 s.backend.disconnect();
@@ -353,7 +388,9 @@ fn execute(factory: &BackendFactory, slots: &mut HashMap<String, Slot>, job: &Jo
             b.subscribe(path, *subscribed)?;
             Ok(Output::Subscribed { path: path.clone(), subscribed: *subscribed })
         }
-        JobKind::Disconnect | JobKind::Test | JobKind::Probe { .. } => Err(Error::Server("handled above".into())),
+        JobKind::Disconnect | JobKind::Test | JobKind::Probe { .. } | JobKind::OAuthExchange { .. } | JobKind::OAuthRefresh { .. } => {
+            Err(Error::Server("handled above".into()))
+        }
     }
 }
 

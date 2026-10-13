@@ -20,6 +20,8 @@ pub struct Store {
     pub unsubscribed: Vec<String>,
     pub user: String,
     pub password: String,
+    /// An OAuth access token accepted by XOAUTH2 (empty = none).
+    pub token: String,
     pub smtp_received: Vec<(String, Vec<String>, Vec<u8>)>,
 }
 
@@ -148,7 +150,7 @@ fn imap_conn(stream: TcpStream, store: Shared) {
         let no = |w: &mut TcpStream, text: &str| {
             let _ = w.write_all(format!("{tag} NO {text}\r\n").as_bytes());
         };
-        if !logged && !matches!(cmd.as_str(), "CAPABILITY" | "LOGIN" | "LOGOUT" | "NOOP") {
+        if !logged && !matches!(cmd.as_str(), "CAPABILITY" | "LOGIN" | "AUTHENTICATE" | "LOGOUT" | "NOOP") {
             no(&mut w, "not logged in");
             continue;
         }
@@ -170,6 +172,25 @@ fn imap_conn(stream: TcpStream, store: Shared) {
                     ok(&mut w, "logged in");
                 } else {
                     no(&mut w, "[AUTHENTICATIONFAILED] wrong user or password");
+                }
+            }
+            "AUTHENTICATE" => {
+                // SASL XOAUTH2: an empty challenge, then the base64 "user=…\x01auth=Bearer …\x01\x01".
+                if args.first().map(|m| m.to_ascii_uppercase()) != Some("XOAUTH2".into()) {
+                    no(&mut w, "unsupported mechanism");
+                    continue;
+                }
+                let _ = w.write_all(b"+ \r\n");
+                let mut answer = String::new();
+                let _ = reader.read_line(&mut answer);
+                let decoded = mailcraft_core::mime::base64_decode(answer.trim()).unwrap_or_default();
+                let s = store.lock().expect("lock");
+                let expected = mailcraft_core::oauth::xoauth2(&s.user, &s.token);
+                if !s.token.is_empty() && decoded == expected.as_bytes() {
+                    logged = true;
+                    ok(&mut w, "authenticated");
+                } else {
+                    no(&mut w, "[AUTHENTICATIONFAILED] invalid token");
                 }
             }
             "LIST" | "LSUB" => {
@@ -401,7 +422,13 @@ fn smtp_conn(stream: TcpStream, store: Shared) {
         }
         let upper = line.trim_end().to_ascii_uppercase();
         let reply: &[u8] = if upper.starts_with("EHLO") || upper.starts_with("HELO") {
-            b"250-fake\r\n250-AUTH PLAIN LOGIN\r\n250 8BITMIME\r\n"
+            b"250-fake\r\n250-AUTH PLAIN LOGIN XOAUTH2\r\n250 8BITMIME\r\n"
+        } else if upper.starts_with("AUTH XOAUTH2") {
+            let s = store.lock().expect("lock");
+            let b64 = line.trim_end().rsplit(' ').next().unwrap_or_default();
+            let decoded = mailcraft_core::mime::base64_decode(b64).unwrap_or_default();
+            let okay = !s.token.is_empty() && decoded == mailcraft_core::oauth::xoauth2(&s.user, &s.token).as_bytes();
+            if okay { b"235 ok\r\n" } else { b"535 5.7.8 authentication failed\r\n" }
         } else if upper.starts_with("AUTH PLAIN") {
             let s = store.lock().expect("lock");
             let b64 = line.trim_end().rsplit(' ').next().unwrap_or_default();
@@ -530,6 +557,17 @@ mod tests {
         assert_eq!(s.smtp_received[0].1, vec!["luca@example.org", "marta@example.org"]);
         assert!(String::from_utf8_lossy(&s.smtp_received[0].2).contains("Subject: Risposta"));
         drop(s);
+        // An OAuth account logs in with XOAUTH2 on both servers (the token is the password).
+        store.lock().expect("lock").token = "tok-123".into();
+        let google = Account { auth: "google".into(), ..account.clone() };
+        let mut o = ImapSmtpBackend::default();
+        assert!(matches!(o.connect(&google, "wrong-token").unwrap_err(), Error::Auth(_)));
+        o.connect(&google, "tok-123").expect("xoauth2 login");
+        assert_eq!(o.mailboxes().expect("list").0.len(), 6);
+        o.test_smtp().expect("smtp xoauth2");
+        o.send("anna@example.com", &["luca@example.org".into()], &raw("Anna", "Via OAuth", "ok", 11)).expect("send");
+        assert_eq!(store.lock().expect("lock").smtp_received.len(), 2);
+        o.disconnect();
         b.disconnect();
         // Connection refused is a Connect error, not a panic.
         let dead = Account { imap: Server::new("127.0.0.1", 1, Security::None), ..account.clone() };

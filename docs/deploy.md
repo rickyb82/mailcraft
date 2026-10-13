@@ -88,6 +88,16 @@ the user's state (folders, the mailbox in view, opened messages, finished jobs) 
 `{"unchanged": true}` otherwise. `GET /api/health` needs no token. Every command is listed by
 `mailcraft-cli commands` and in `crates/engine/src/cmd.rs`.
 
+## Gmail and Microsoft 365 (OAuth)
+
+Create a *Web application* OAuth client for each provider with the redirect URI
+`https://mail.example.com/api/oauth/callback` and give it to the container:
+`MAILCRAFT_GOOGLE_CLIENT_ID`, `MAILCRAFT_GOOGLE_CLIENT_SECRET` (and the `MICROSOFT` pair). Set
+`MAILCRAFT_PUBLIC_URL=https://mail.example.com` when the proxy does not send
+`X-Forwarded-Proto`/`X-Forwarded-Host`. Users then pick *Google* as sign-in in the account form
+and approve in the browser; the provider sends them back to the callback, which completes the
+sign-in of the session that started it. Details: [`oauth.md`](oauth.md).
+
 ## Data and backups
 
 ```

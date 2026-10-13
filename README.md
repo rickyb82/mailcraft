@@ -32,6 +32,10 @@ triage and answer your mail. Part of the *craft* family (`gridcraft`, `ideacraft
   message list with stars, hover actions and bulk actions, a reading pane (or full view), a
   compose card docked at the bottom right, light and dark themes, English and Italian, keyboard
   shortcuts (`c` compose, `/` search, `j`/`k`, `e` archive, `#` trash, `s` star, `r` reply…).
+- **Gmail and Microsoft 365, the Thunderbird way** — OAuth sign-in (XOAUTH2) with the
+  provider's consent page in the browser, tokens renewed automatically; you create the OAuth
+  client once in the provider's console and paste it in Settings (or `mailcraft-cli oauth`, or
+  environment variables on a server). App passwords still work. See [`docs/oauth.md`](docs/oauth.md).
 - **Your folders, your way** — the account form lists the server's folders: untick one to hide
   it from the navigation (IMAP subscription), pick the Sent, Drafts, Trash, Spam and Archive
   folders when the server names them unusually, create folders. Sent mail is copied to the

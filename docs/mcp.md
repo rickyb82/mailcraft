@@ -38,6 +38,16 @@ try the tools. `--home DIR` uses another configuration directory.
 | `set_password` | Store or replace a password |
 | `get_preferences` / `set_preferences` | language, theme, sync_minutes, page_size, reading_pane, conversations, mark_read_on_open, undo_send_seconds, default_account |
 
+### Sign-in with Google / Microsoft 365
+
+| Tool | What it does |
+|---|---|
+| `oauth_providers` | Google and Microsoft 365: whether a client is configured, where to create one |
+| `configure_oauth` | Save the client id and secret (once) |
+| `sign_in` | Start the sign-in of an account: returns the URL the person opens; the sign-in completes on its own, then `test_account` |
+
+See [`oauth.md`](oauth.md).
+
 ## Mail tools
 
 | Tool | What it does |

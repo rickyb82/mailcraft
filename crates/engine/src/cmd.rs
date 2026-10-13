@@ -6,7 +6,7 @@ use mailcraft_core::autoconfig;
 use mailcraft_core::backend::{FlagChange, Page, SearchQuery};
 use mailcraft_core::mailbox::Role;
 use mailcraft_core::message::{Address, Draft, DraftAttachment, Flags, time};
-use mailcraft_core::{limits, mime};
+use mailcraft_core::{limits, mime, oauth};
 use serde_json::{Value, json};
 
 use crate::worker::JobKind;
@@ -55,7 +55,46 @@ pub const COMMANDS: &[Command] = &[
     ),
     c("account.remove", "Remove Account", "Settings › Accounts › Remove", "", "{id}", false),
     c("account.list", "Accounts", "Settings › Accounts", "", "{} → accounts (without passwords) and their status", false),
-    c("account.setPassword", "Set Password", "Settings › Accounts › Password", "", "{id?, password}", false),
+    c(
+        "account.setPassword",
+        "Set Password",
+        "Settings › Accounts › Password",
+        "",
+        "{id?, password} (an OAuth account switches back to a password)",
+        false,
+    ),
+    c(
+        "account.oauthStart",
+        "Sign In",
+        "Settings › Accounts › Sign in",
+        "",
+        "{id? | email?, provider?: google|microsoft (default: the account's or the address's), redirect?: URL (default: a listener on this machine)} → {url to open in the browser, state}; the browser's return finishes the sign-in (account.oauthFinish)",
+        false,
+    ),
+    c(
+        "account.oauthFinish",
+        "Finish Sign In",
+        "Settings › Accounts › Sign in",
+        "",
+        "{state, code | error} → job: exchanges the code for tokens, then loads the folders",
+        true,
+    ),
+    c(
+        "oauth.providers",
+        "OAuth Providers",
+        "Settings › Sign-in",
+        "",
+        "{} → google, microsoft: configured?, where to create the client, notes",
+        false,
+    ),
+    c(
+        "oauth.configure",
+        "Configure OAuth Client",
+        "Settings › Sign-in",
+        "",
+        "{provider: google|microsoft, client_id (empty = remove), client_secret?}",
+        false,
+    ),
     c("account.test", "Test Account", "Settings › Accounts › Test", "", "{id?} → job: IMAP login, mailbox count, SMTP login", true),
     c(
         "account.probe",
@@ -342,6 +381,15 @@ impl Session {
         if let Some(v) = p::opt_bool(prm, "save_sent") {
             a.save_sent = v;
         }
+        if let Some(v) = p::opt_str(prm, "auth") {
+            let v = v.trim().to_ascii_lowercase();
+            a.auth = match v.as_str() {
+                "" | "password" => String::new(),
+                other => oauth::provider(other)
+                    .map(|p| p.id.to_string())
+                    .ok_or_else(|| Error::Param(format!("unknown auth `{other}`: password, google or microsoft")))?,
+            };
+        }
         for (prefix, server) in [("imap", &mut a.imap), ("smtp", &mut a.smtp)] {
             if let Some(h) = p::opt_str(prm, &format!("{prefix}_host")).filter(|s| !s.is_empty()) {
                 server.host = h.to_string();
@@ -472,6 +520,7 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
                 "smtp": {"host": sg.smtp.host, "port": sg.smtp.port, "security": sg.smtp.security.name()},
                 "alternatives": sg.alternatives.iter().map(|(i, m)| json!({"imap": i.describe(), "smtp": m.describe()})).collect::<Vec<_>>(),
                 "notes": sg.notes,
+                "oauth": sg.oauth,
             }))
         }
         "account.add" => {
@@ -485,7 +534,11 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
                 smtp: sg.smtp.clone(),
                 ..Account::default()
             };
-            let account = s.account_from_params(prm, base)?;
+            let mut account = s.account_from_params(prm, base)?;
+            // A Google or Microsoft address without a password signs in with the provider.
+            if account.auth.is_empty() && p::opt_str(prm, "auth").is_none() && p::opt_str(prm, "password").is_none_or(str::is_empty) {
+                account.auth = sg.oauth.unwrap_or_default().to_string();
+            }
             let id = s.config.upsert(account)?;
             if let Some(pw) = p::opt_str(prm, "password").filter(|p| !p.is_empty()) {
                 s.secrets.set_password(&id, pw);
@@ -507,11 +560,14 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             let id = s.account_id(prm)?;
             let base = s.config.account(&id).cloned().ok_or_else(|| mailcraft_core::Error::NoAccount(id.clone()))?;
             let updated = s.account_from_params(prm, base)?;
-            let updated = Account { id: id.clone(), ..updated };
-            s.config.upsert(updated)?;
+            let mut updated = Account { id: id.clone(), ..updated };
             if let Some(pw) = p::opt_str(prm, "password").filter(|p| !p.is_empty()) {
                 s.secrets.set_password(&id, pw);
+                if p::opt_str(prm, "auth").is_none() {
+                    updated.auth.clear();
+                }
             }
+            s.config.upsert(updated)?;
             s.save_config()?;
             let _ = s.submit("account.update", &id, JobKind::Disconnect);
             let a = s.config.account(&id).cloned().unwrap_or_default();
@@ -521,6 +577,7 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             let id = s.account_id(prm)?;
             s.config.remove(&id)?;
             s.secrets.set_password(&id, "");
+            s.secrets.set_tokens(&id, None);
             s.store.remove(&id);
             if let Some(paths) = &s.paths {
                 let _ = std::fs::remove_dir_all(paths.cache.join(&id));
@@ -543,6 +600,13 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             let id = s.account_id(prm)?;
             let pw = prm.get("password").and_then(Value::as_str).ok_or_else(|| Error::Param("`password` is required".into()))?;
             s.secrets.set_password(&id, pw);
+            if !pw.is_empty()
+                && let Some(mut a) = s.config.account(&id).cloned()
+                && !a.auth.is_empty()
+            {
+                a.auth.clear();
+                s.config.upsert(a)?;
+            }
             s.save_config()?;
             let _ = s.submit("account.setPassword", &id, JobKind::Disconnect);
             Ok(json!({"id": id, "has_password": !pw.is_empty()}))
@@ -551,6 +615,95 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             let id = s.account_id(prm)?;
             let job = s.submit("account.test", &id, JobKind::Test)?;
             Ok(json!({"job": job}))
+        }
+        "account.oauthStart" => {
+            let id = s.account_id(prm)?;
+            let mut account = s.config.account(&id).cloned().ok_or_else(|| mailcraft_core::Error::NoAccount(id.clone()))?;
+            let provider = match p::opt_str(prm, "provider").filter(|v| !v.is_empty()) {
+                Some(v) => oauth::provider(v).ok_or_else(|| Error::Param(format!("unknown provider `{v}`: google or microsoft")))?,
+                None => account
+                    .oauth_provider()
+                    .or_else(|| oauth::provider_for_email(&account.email))
+                    .ok_or_else(|| Error::Param("name the provider to sign in with: google or microsoft".into()))?,
+            };
+            let client = s.config.oauth_client(provider.id).ok_or_else(|| {
+                Error::Param(format!(
+                    "no OAuth client for {}: create one at {} and save it with oauth.configure (or MAILCRAFT_{}_CLIENT_ID)",
+                    provider.name,
+                    provider.console,
+                    provider.id.to_ascii_uppercase()
+                ))
+            })?;
+            if account.auth != provider.id {
+                account.auth = provider.id.to_string();
+                s.config.upsert(account.clone())?;
+                s.save_config()?;
+            }
+            let redirect = match p::opt_str(prm, "redirect").filter(|r| !r.is_empty()) {
+                Some(r) => r.to_string(),
+                None => s.loopback_redirect()?,
+            };
+            let (flow, url) = oauth::start(provider, &client, &id, &account.email, &redirect);
+            let now = time::now();
+            s.flows.retain(|f| !f.expired(now) && f.account != id);
+            let state = flow.state.clone();
+            s.flows.push(flow);
+            Ok(json!({"url": url, "state": state, "redirect": redirect, "provider": provider.id, "account": id}))
+        }
+        "account.oauthFinish" => {
+            let state = p::str(prm, "state")?.to_string();
+            let now = time::now();
+            s.flows.retain(|f| !f.expired(now));
+            let i = s.flows.iter().position(|f| f.state == state).ok_or_else(|| Error::Param("unknown or expired sign-in: start it again".into()))?;
+            if let Some(e) = p::opt_str(prm, "error").filter(|e| !e.is_empty()) {
+                s.flows.remove(i);
+                return Err(Error::Core(mailcraft_core::Error::Auth(format!("sign-in refused: {e}"))));
+            }
+            let code = p::str(prm, "code")?.to_string();
+            let flow = s.flows.remove(i);
+            let client =
+                s.config.oauth_client(flow.provider.id).ok_or_else(|| Error::Param(format!("no OAuth client for {}", flow.provider.name)))?;
+            let job = s.submit(
+                "account.oauthFinish",
+                &flow.account,
+                JobKind::OAuthExchange { client, code, verifier: flow.verifier, redirect: flow.redirect },
+            )?;
+            Ok(json!({"job": job, "account": flow.account}))
+        }
+        "oauth.providers" => {
+            let list: Vec<Value> = oauth::PROVIDERS
+                .iter()
+                .map(|p| {
+                    let source = if s.config.oauth.get(p.id).is_some_and(|c| !c.client_id.trim().is_empty()) {
+                        "config"
+                    } else if oauth::ClientCredentials::from_env(p.id).is_some() {
+                        "env"
+                    } else {
+                        ""
+                    };
+                    json!({"id": p.id, "name": p.name, "configured": !source.is_empty(), "source": source, "console": p.console, "scope": p.scope, "note": if italian { p.note_it } else { p.note }, "client_id": s.config.oauth_client(p.id).map(|c| c.client_id).unwrap_or_default()})
+                })
+                .collect();
+            Ok(json!({"providers": list}))
+        }
+        "oauth.configure" => {
+            let provider = p::str(prm, "provider")?;
+            let provider = oauth::provider(provider).ok_or_else(|| Error::Param(format!("unknown provider `{provider}`: google or microsoft")))?;
+            let client_id = p::opt_str(prm, "client_id").unwrap_or_default().trim().to_string();
+            if client_id.is_empty() {
+                s.config.oauth.remove(provider.id);
+            } else {
+                let client_secret = p::opt_str(prm, "client_secret").unwrap_or_default().trim().to_string();
+                s.config.oauth.insert(
+                    provider.id.to_string(),
+                    oauth::ClientCredentials {
+                        client_id: mailcraft_core::clip(&client_id, 500).to_string(),
+                        client_secret: mailcraft_core::clip(&client_secret, 500).to_string(),
+                    },
+                );
+            }
+            s.save_config()?;
+            Ok(json!({"provider": provider.id, "configured": s.config.oauth_client(provider.id).is_some()}))
         }
         "account.probe" => {
             let id = s.account_id(prm)?;

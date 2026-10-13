@@ -162,11 +162,22 @@ impl MailApp {
                     }
                     self.settings.result = self.tr("Saved").to_string();
                     self.settings.reload = true;
-                    if self.session.has_password(&id) || v["account"]["has_password"] == true {
+                    if self.settings.oauth_after_save {
+                        self.settings.oauth_after_save = false;
+                        self.run("account.oauthStart", json!({"id": id}));
+                    } else if self.session.has_password(&id) || v["account"]["has_password"] == true {
                         self.run("account.test", json!({"id": id}));
                         // Load the folders right away: the form lists them.
                         self.run("mail.sync", json!({"account": id}));
                     }
+                }
+            }
+            "account.oauthStart" => {
+                if let Some(url) = v["url"].as_str() {
+                    self.requests.push(Request::OpenUrl(url.to_string()));
+                    let text = self.tr("Complete the sign-in in the browser, then come back here").to_string();
+                    self.settings.result = text.clone();
+                    self.status = text;
                 }
             }
             "mail.attachment" => {
@@ -270,7 +281,18 @@ impl MailApp {
         for c in done {
             match c.result {
                 Ok(v) => match c.command.as_str() {
-                    "account.suggest" | "account.add" | "account.update" | "mail.attachment" => self.handle_result(&c.command, &v),
+                    "account.suggest" | "account.add" | "account.update" | "account.oauthStart" | "mail.attachment" => {
+                        self.handle_result(&c.command, &v)
+                    }
+                    "account.oauthFinish" => {
+                        let text = self.tr("Signed in").to_string();
+                        self.settings.result = text.clone();
+                        self.settings.reload = true;
+                        self.toast(text);
+                        if let Some(id) = v["account"].as_str() {
+                            self.run("account.test", json!({"id": id}));
+                        }
+                    }
                     "mail.send" | "mail.reply" | "mail.forward" => {
                         if let Some(e) = v["copy_error"].as_str() {
                             self.status = self.language.fill("Message sent, but the copy to the Sent folder failed: {error}", &[("error", e)]);

@@ -34,6 +34,17 @@ fn imap_err(e: imap::Error) -> Error {
     }
 }
 
+/// The XOAUTH2 SASL answer (the crate base64-encodes it).
+struct XOAuth2(String);
+
+impl imap::Authenticator for XOAuth2 {
+    type Response = String;
+
+    fn process(&self, _challenge: &[u8]) -> Self::Response {
+        self.0.clone()
+    }
+}
+
 /// Quotes an IMAP string (mailbox names, search text).
 fn quoted(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -201,11 +212,18 @@ impl ImapSmtpBackend {
             .danger_skip_tls_verify(account.trust_invalid_certs)
             .connect()
             .map_err(|e| Error::Connect(format!("{}: {e}", account.imap.describe())))?;
-        let mut session = client.login(account.login(), password).map_err(|(e, _)| match e {
+        let auth_err = |e: imap::Error| match e {
             imap::Error::No(r) => Error::Auth(r.information),
             imap::Error::Bad(r) => Error::Auth(r.information),
             other => Error::Auth(other.to_string()),
-        })?;
+        };
+        // OAuth accounts present their access token with SASL XOAUTH2; the rest log in.
+        let mut session = if account.oauth_provider().is_some() {
+            let sasl = XOAuth2(mailcraft_core::oauth::xoauth2(account.login(), password));
+            client.authenticate("XOAUTH2", &sasl).map_err(|(e, _)| auth_err(e))?
+        } else {
+            client.login(account.login(), password).map_err(|(e, _)| auth_err(e))?
+        };
         let caps = session.capabilities().map_err(imap_err)?;
         self.has_move = caps.has_str("MOVE");
         self.has_uidplus = caps.has_str("UIDPLUS");

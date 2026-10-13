@@ -33,6 +33,8 @@ tests it, find_servers probes the usual host names when the provider is unknown,
 Prompts: setup_account (configure a mailbox from a description), triage_inbox (summarise and act on unread mail), write_email, configure. \
 Mail: sync, list_mailboxes, list_messages (uids), search (from: subject: is:unread has:attachment newer_than:7d), read_message, reply, \
 forward, send_mail, mark, archive, trash, spam, move, save_draft, save_attachment. Never invent a password: ask the person for it. \
+Gmail and Microsoft 365 sign in with OAuth like Thunderbird: configure_oauth once with the client id and secret the person created in the provider's console (oauth_providers explains where), \
+then add_account without a password and sign_in: give the person the URL to open; the sign-in completes by itself, then test_account. An app password works too. \
 Before sending or deleting on their behalf, show what will be sent or removed and wait for a yes.";
 
 type ToolResult = Result<Value, String>;
@@ -85,7 +87,13 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"email": {"type": "string"}, "language": language}, "required": ["email"]}},
         {"name": "add_account", "description": "Add (or replace) an account from an address and password; servers not given come from suggest_settings. With test=true (default) it logs in to IMAP and SMTP; for unknown domains it probes the usual host names first and keeps the working one. Returns the saved account, what was tested and the provider's notes.",
          "inputSchema": {"type": "object", "properties": add_props, "required": ["email"]}},
-        {"name": "list_accounts", "description": "The configured accounts (never passwords): servers, signature, status, unread count.",
+        {"name": "oauth_providers", "description": "The OAuth providers (Google, Microsoft 365): whether a client is configured, where to create one and what to pick there.",
+         "inputSchema": {"type": "object", "properties": {"language": language}}},
+        {"name": "configure_oauth", "description": "Save the OAuth client (id and secret) created in the provider's console; an empty client_id removes it. Needed once before sign_in.",
+         "inputSchema": {"type": "object", "properties": {"provider": {"type": "string", "enum": ["google", "microsoft"]}, "client_id": {"type": "string"}, "client_secret": {"type": "string"}}, "required": ["provider", "client_id"]}},
+        {"name": "sign_in", "description": "Start the OAuth sign-in of an account (Google or Microsoft 365): returns the URL the person must open in a browser. The sign-in completes on its own when the browser comes back; then call test_account.",
+         "inputSchema": {"type": "object", "properties": {"account": account, "provider": {"type": "string", "enum": ["google", "microsoft"]}, "redirect": {"type": "string", "description": "Redirect URL (default: a listener on this machine)"}}}},
+        {"name": "list_accounts", "description": "The configured accounts (never passwords or tokens): servers, sign-in method, signature, status, unread count.",
          "inputSchema": {"type": "object", "properties": {}}},
         {"name": "update_account", "description": "Change an account's name, servers, signature, folders, password… Only the fields given change.",
          "inputSchema": {"type": "object", "properties": update_props, "required": ["id"]}},
@@ -368,6 +376,15 @@ impl Server {
                 let mut out =
                     json!({"account": added["account"], "notes": added["suggestion"]["notes"], "provider": added["suggestion"]["provider"]});
                 let test = args.get("test").and_then(Value::as_bool).unwrap_or(true);
+                if added["account"]["auth"].as_str().is_some_and(|a| a != "password") && added["account"]["has_password"] != true {
+                    out["next"] = json!("sign_in");
+                    out["text"] = json!(if italian {
+                        format!("Account salvato. Accede con {}: chiama sign_in e fai aprire l'indirizzo alla persona.", added["account"]["auth"])
+                    } else {
+                        format!("Account saved. It signs in with {}: call sign_in and have the person open the address.", added["account"]["auth"])
+                    });
+                    return Ok(out);
+                }
                 if !test {
                     return Ok(out);
                 }
@@ -399,6 +416,28 @@ impl Server {
                 Ok(out)
             }
             "list_accounts" => self.run("account.list", json!({})),
+            "oauth_providers" => self.run("oauth.providers", self.pass_through(args, &["language"])),
+            "configure_oauth" => self.run("oauth.configure", self.pass_through(args, &["provider", "client_id", "client_secret"])),
+            "sign_in" => {
+                let mut prm = self.pass_through(args, &["provider", "redirect"]);
+                if let Some(a) = args.get("account") {
+                    prm["id"] = a.clone();
+                }
+                let v = self.run("account.oauthStart", prm)?;
+                let url = v["url"].as_str().unwrap_or_default();
+                let text = if italian {
+                    format!(
+                        "Apri questo indirizzo nel browser e accedi con {}:\n{url}\nL'accesso si completa da solo; poi test_account.",
+                        v["provider"]
+                    )
+                } else {
+                    format!(
+                        "Open this address in a browser and sign in with {}:\n{url}\nThe sign-in completes on its own; then test_account.",
+                        v["provider"]
+                    )
+                };
+                Ok(json!({"text": text, "url": url, "provider": v["provider"], "account": v["account"], "redirect": v["redirect"]}))
+            }
             "update_account" => {
                 let keys = [
                     "id",
@@ -745,6 +784,17 @@ mod tests {
         let accounts = call(&mut s, "list_accounts", json!({}));
         assert_eq!(accounts["accounts"].as_array().unwrap().len(), 2);
         assert!(!accounts.to_string().contains("app-pw"), "passwords never leave");
+        // OAuth: a Gmail address without a password waits for sign_in; the client comes first.
+        let v = call(&mut s, "add_account", json!({"email": "anna@gmail.com", "name": "Anna"}));
+        assert_eq!(v["next"], "sign_in");
+        assert!(fails(&mut s, "sign_in", json!({"account": "anna@gmail.com"})).contains("configure"));
+        let p = call(&mut s, "oauth_providers", json!({}));
+        assert_eq!(p["providers"][0]["id"], "google");
+        call(&mut s, "configure_oauth", json!({"provider": "google", "client_id": "cid", "client_secret": "s3"}));
+        let v = call(&mut s, "sign_in", json!({"account": "anna@gmail.com"}));
+        assert!(v["url"].as_str().unwrap().contains("client_id=cid"));
+        assert!(v["text"].as_str().unwrap().contains("accounts.google.com"));
+        assert!(!call(&mut s, "list_accounts", json!({})).to_string().contains("s3\""), "secrets never leave");
         call(&mut s, "set_preferences", json!({"theme": "dark", "language": "it", "sync_minutes": 3}));
         assert_eq!(call(&mut s, "get_preferences", json!({}))["preferences"]["theme"], "dark");
         assert!(fails(&mut s, "set_preferences", json!({"theme": "neon"})).contains("theme"));
@@ -774,7 +824,7 @@ mod tests {
         assert!(fails(&mut s, "send_mail", json!({"to": "", "subject": "x", "body": "y"})).contains("to"));
         assert!(fails(&mut s, "mark", json!({"uids": [1]})).contains("read"));
         call(&mut s, "remove_account", json!({"id": "mario-sirius-example-it"}));
-        assert_eq!(call(&mut s, "list_accounts", json!({}))["accounts"].as_array().unwrap().len(), 1);
+        assert_eq!(call(&mut s, "list_accounts", json!({}))["accounts"].as_array().unwrap().len(), 2, "gmail + anna");
     }
 
     #[test]

@@ -93,7 +93,7 @@ fn main() -> Result<(), String> {
             Some(h) => Paths::under(std::path::Path::new(&h)),
             None => Paths::default_dirs(),
         };
-        Session::new(mailcraft_net::factory(), Some(paths))
+        Session::with_broker(mailcraft_net::factory(), mailcraft_net::broker(), Some(paths))
     };
     let mut app = MailApp::new(Box::new(session));
     if let Some(l) = lang {

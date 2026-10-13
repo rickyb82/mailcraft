@@ -27,6 +27,9 @@ pub struct Suggestion {
     pub alternatives: Vec<(Server, Server)>,
     /// Things the person must know (app passwords, OAuth, bridges…), in the asked language.
     pub notes: Vec<String>,
+    /// The OAuth provider to sign in with (`google`, `microsoft`) when the address belongs to
+    /// one; a password (an app password) stays possible.
+    pub oauth: Option<&'static str>,
 }
 
 struct Provider {
@@ -54,8 +57,8 @@ const PROVIDERS: &[Provider] = &[
         imap: ("imap.gmail.com", 993, T),
         smtp: ("smtp.gmail.com", 465, T),
         smtp_alt: Some(("smtp.gmail.com", 587, S)),
-        note: "Gmail: enable IMAP in Gmail settings and use an app password (Google account › Security › 2-Step Verification › App passwords).",
-        note_it: "Gmail: attiva IMAP nelle impostazioni di Gmail e usa una password per le app (Account Google › Sicurezza › Verifica in due passaggi › Password per le app).",
+        note: "Gmail: sign in with Google (OAuth, like Thunderbird and Outlook do) or use an app password (Google account › Security › 2-Step Verification › App passwords); IMAP must be enabled in Gmail settings.",
+        note_it: "Gmail: accedi con Google (OAuth, come fanno Thunderbird e Outlook) oppure usa una password per le app (Account Google › Sicurezza › Verifica in due passaggi › Password per le app); IMAP deve essere attivo nelle impostazioni di Gmail.",
     },
     Provider {
         name: "Outlook.com",
@@ -316,6 +319,11 @@ pub fn suggest(email: &str, italian: bool) -> Result<Suggestion> {
             alternatives.push((server(p.imap), server(alt)));
         }
         let note = if italian { p.note_it } else { p.note };
+        let oauth = crate::oauth::provider_for_email(email);
+        let mut notes = if note.is_empty() { Vec::new() } else { vec![note.to_string()] };
+        if let Some(o) = oauth {
+            notes.push(if italian { o.note_it.to_string() } else { o.note.to_string() });
+        }
         return Ok(Suggestion {
             provider: Some(p.name),
             confidence: Confidence::Known,
@@ -323,7 +331,8 @@ pub fn suggest(email: &str, italian: bool) -> Result<Suggestion> {
             smtp: server(p.smtp),
             username,
             alternatives,
-            notes: if note.is_empty() { Vec::new() } else { vec![note.to_string()] },
+            notes,
+            oauth: oauth.map(|o| o.id),
         });
     }
     // Conventional names first, then the big hosting providers.
@@ -359,7 +368,7 @@ pub fn suggest(email: &str, italian: bool) -> Result<Suggestion> {
             "`{domain}` is not a known provider: MailCraft tries the conventional names (imap./mail./smtp.{domain}) and then the big hosting providers (Aruba, Microsoft 365, Google Workspace, OVH, Register.it). If none works, ask whoever runs the domain for the IMAP and SMTP servers."
         )
     };
-    Ok(Suggestion { provider: None, confidence: Confidence::Guess, imap, smtp, username, alternatives, notes: vec![note] })
+    Ok(Suggestion { provider: None, confidence: Confidence::Guess, imap, smtp, username, alternatives, notes: vec![note], oauth: None })
 }
 
 /// Every known provider: name and the first domain, for documentation and the MCP tool.

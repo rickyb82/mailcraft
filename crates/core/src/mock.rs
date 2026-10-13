@@ -71,6 +71,11 @@ impl MockBackend {
         self
     }
 
+    /// Changes the password the server accepts (a rotated token).
+    pub fn with_password(&self, password: &str) {
+        self.with(|s| s.password = Some(password.to_string()));
+    }
+
     /// Fail every connection with this message.
     pub fn failing(self, message: &str) -> Self {
         self.with(|s| s.fail_connect = Some(message.to_string()));

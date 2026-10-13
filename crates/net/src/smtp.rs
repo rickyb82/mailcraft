@@ -1,6 +1,6 @@
 //! Sending through SMTP with `lettre`.
 
-use lettre::transport::smtp::authentication::Credentials;
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{SmtpTransport, Transport};
 use mailcraft_core::account::{Account, Security};
@@ -41,8 +41,13 @@ fn transport(account: &Account, password: &str) -> Result<SmtpTransport> {
         Security::StartTls => SmtpTransport::relay(host).map_err(|e| Error::Connect(e.to_string()))?.port(account.smtp.port).tls(tls(Tls::Required)?),
         Security::None => SmtpTransport::builder_dangerous(host).port(account.smtp.port).tls(Tls::None),
     };
-    let builder =
-        if password.is_empty() { builder } else { builder.credentials(Credentials::new(account.login().to_string(), password.to_string())) };
+    let builder = if password.is_empty() {
+        builder
+    } else if account.oauth_provider().is_some() {
+        builder.credentials(Credentials::new(account.login().to_string(), password.to_string())).authentication(vec![Mechanism::Xoauth2])
+    } else {
+        builder.credentials(Credentials::new(account.login().to_string(), password.to_string()))
+    };
     Ok(builder.timeout(Some(std::time::Duration::from_secs(60))).build())
 }
 

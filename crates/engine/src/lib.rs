@@ -8,11 +8,14 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod cmd;
+pub mod loopback;
 pub mod store;
 pub mod worker;
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc::{Receiver, Sender};
 use std::time::Duration;
 
 use web_time::Instant;
@@ -23,6 +26,7 @@ use mailcraft_core::account::{Account, Config, Secrets};
 use mailcraft_core::backend::{BackendFactory, FlagChange, Page};
 use mailcraft_core::mailbox::Role;
 use mailcraft_core::message::{Envelope, Message, time};
+use mailcraft_core::oauth::{Flow, MockBroker, NoBroker, OAuthBroker};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use store::AccountState;
@@ -37,6 +41,8 @@ pub enum Error {
     UnknownCommand(String),
     #[error("account `{0}` has no password: set it with account.setPassword")]
     NoPassword(String),
+    #[error("account `{0}` is not signed in: sign in with account.oauthStart")]
+    NotSignedIn(String),
     #[error("job {0} did not finish in time")]
     Timeout(u64),
     #[error("{0}")]
@@ -183,6 +189,9 @@ pub struct Snapshot {
     pub notes: Vec<String>,
     /// Jobs completed after the client's revision.
     pub completed: Vec<CompletedJson>,
+    /// OAuth providers with a configured client (`google`, `microsoft`): sign-in is possible.
+    #[serde(default)]
+    pub oauth_ready: Vec<String>,
 }
 
 /// What an interface needs from a session: the local [`Session`] implements it directly, a
@@ -207,6 +216,10 @@ pub trait MailSession {
         String::new()
     }
     fn set_server(&mut self, _url: &str) {}
+    /// OAuth providers whose client is configured (sign-in with them works).
+    fn oauth_ready(&self) -> Vec<String> {
+        Vec::new()
+    }
     fn current(&self) -> Option<&AccountState> {
         self.state(&self.view().account)
     }
@@ -294,12 +307,25 @@ pub struct Session {
     history: VecDeque<CompletedJson>,
     /// Completions seen by `wait` that the next `pump` must still report.
     buffered: Vec<Completed>,
+    /// OAuth sign-ins waiting for the browser to come back.
+    flows: Vec<Flow>,
+    /// Accounts whose access token is being renewed (one refresh at a time).
+    refreshing: BTreeSet<String>,
+    /// The loopback listener's callbacks (desktop sign-in).
+    callbacks: (Sender<loopback::Callback>, Receiver<loopback::Callback>),
+    loopback: Option<loopback::Loopback>,
 }
 
 impl Session {
     /// Loads the configuration, secrets and caches from `paths` (or starts empty) and starts
     /// the worker with `factory`.
     pub fn new(factory: BackendFactory, paths: Option<Paths>) -> Self {
+        Self::with_broker(factory, Arc::new(NoBroker), paths)
+    }
+
+    /// Like [`Session::new`], with the OAuth broker that signs accounts in with Google or
+    /// Microsoft (`mailcraft_net::broker()`).
+    pub fn with_broker(factory: BackendFactory, broker: Arc<dyn OAuthBroker>, paths: Option<Paths>) -> Self {
         let mut notes = Vec::new();
         let (config, secrets) = match &paths {
             Some(p) => {
@@ -337,13 +363,37 @@ impl Session {
             notes,
             store,
             view,
-            worker: Worker::start(factory),
+            worker: Worker::start(factory, broker),
             next_job: 1,
             pending: BTreeMap::new(),
             revision: 1,
             history: VecDeque::new(),
             buffered: Vec::new(),
+            flows: Vec::new(),
+            refreshing: BTreeSet::new(),
+            callbacks: std::sync::mpsc::channel(),
+            loopback: None,
         }
+    }
+
+    /// The redirect URL of the loopback listener for a sign-in on this machine (started when
+    /// none is waiting).
+    pub(crate) fn loopback_redirect(&mut self) -> Result<String> {
+        if let Some(lb) = &self.loopback
+            && lb.alive()
+        {
+            return Ok(lb.redirect());
+        }
+        let lb = loopback::start(self.callbacks.0.clone())
+            .map_err(|e| Error::Core(mailcraft_core::Error::Server(format!("cannot listen for the sign-in on this machine: {e}"))))?;
+        let redirect = lb.redirect();
+        self.loopback = Some(lb);
+        Ok(redirect)
+    }
+
+    /// OAuth providers whose client is configured.
+    pub fn oauth_ready(&self) -> Vec<String> {
+        mailcraft_core::oauth::PROVIDERS.iter().filter(|p| self.config.oauth_client(p.id).is_some()).map(|p| p.id.to_string()).collect()
     }
 
     /// The state for a remote interface, or `None` when nothing changed since `since`.
@@ -384,7 +434,8 @@ impl Session {
         Some(Snapshot {
             revision: self.revision,
             config: self.config.clone(),
-            passwords: self.config.accounts.iter().filter(|a| self.secrets.password(&a.id).is_some()).map(|a| a.id.clone()).collect(),
+            passwords: self.config.accounts.iter().filter(|a| self.secrets.has_credential(a)).map(|a| a.id.clone()).collect(),
+            oauth_ready: self.oauth_ready(),
             view: self.view.clone(),
             states,
             jobs_pending: self.pending.len(),
@@ -414,7 +465,7 @@ impl Session {
         let mocks: std::collections::HashMap<String, mailcraft_core::mock::MockBackend> =
             ["demo", "lavoro"].into_iter().map(|id| (id.to_string(), mailcraft_core::mock::MockBackend::demo())).collect();
         let factory: BackendFactory = Box::new(move |a| Box::new(mocks.get(&a.id).cloned().unwrap_or_else(mailcraft_core::mock::MockBackend::demo)));
-        let mut s = Self::new(factory, None);
+        let mut s = Self::with_broker(factory, Arc::new(MockBroker::default()), None);
         let account = Account {
             id: "demo".into(),
             name: "Demo".into(),
@@ -473,7 +524,7 @@ impl Session {
     }
 
     pub fn has_password(&self, id: &str) -> bool {
-        self.secrets.password(id).is_some()
+        self.config.account(id).is_some_and(|a| self.secrets.has_credential(a))
     }
 
     pub fn jobs_pending(&self) -> usize {
@@ -545,6 +596,14 @@ impl Session {
     /// Applies every event the worker produced and saves dirty caches. The interface calls this
     /// every frame.
     pub fn pump(&mut self) -> Vec<Completed> {
+        // The browser came back from a sign-in: finish it (the exchange runs as a job).
+        let callbacks: Vec<loopback::Callback> = self.callbacks.1.try_iter().collect();
+        for cb in callbacks {
+            let prm = json!({"state": cb.state, "code": cb.code, "error": cb.error});
+            if let Err(e) = self.execute("account.oauthFinish", &prm) {
+                self.buffered.push(Completed { job: 0, command: "account.oauthFinish".into(), account: String::new(), result: Err(e) });
+            }
+        }
         let events = self.worker.poll();
         let mut out = std::mem::take(&mut self.buffered);
         for ev in events {
@@ -573,11 +632,29 @@ impl Session {
         Ok(())
     }
 
-    /// Queues a job for an account (which must have a password).
+    /// Queues a job for an account (which must have a password, or OAuth tokens: an expired
+    /// access token is renewed first).
     fn submit(&mut self, command: &str, account_id: &str, kind: JobKind) -> Result<u64> {
         let account = self.config.account(account_id).ok_or_else(|| mailcraft_core::Error::NoAccount(account_id.to_string()))?.clone();
-        let password = self.secrets.password(account_id).map(str::to_string).unwrap_or_default();
-        if password.is_empty() && !matches!(kind, JobKind::Disconnect) {
+        let oauth_job = matches!(kind, JobKind::OAuthExchange { .. } | JobKind::OAuthRefresh { .. });
+        let password = self.secrets.credential(&account).map(str::to_string).unwrap_or_default();
+        if let Some(provider) = account.oauth_provider()
+            && !oauth_job
+            && !matches!(kind, JobKind::Disconnect)
+        {
+            let tokens = self.secrets.tokens(account_id).cloned().unwrap_or_default();
+            if tokens.refresh_token.is_empty() && tokens.access_token.is_empty() {
+                return Err(Error::NotSignedIn(account_id.to_string()));
+            }
+            if tokens.expired(time::now()) && !tokens.refresh_token.is_empty() && !self.refreshing.contains(account_id) {
+                let client = self
+                    .config
+                    .oauth_client(provider.id)
+                    .ok_or_else(|| Error::Param(format!("no OAuth client for {}: configure it with oauth.configure", provider.name)))?;
+                self.refreshing.insert(account_id.to_string());
+                self.submit("oauth.refresh", account_id, JobKind::OAuthRefresh { client, refresh_token: tokens.refresh_token })?;
+            }
+        } else if password.is_empty() && !matches!(kind, JobKind::Disconnect) && !oauth_job {
             return Err(Error::NoPassword(account_id.to_string()));
         }
         let id = self.next_job;
@@ -608,6 +685,9 @@ impl Session {
         let result = match ev.result {
             Ok(out) => self.apply_output(&account, &command, ev.kind, out),
             Err(e) => {
+                if matches!(ev.kind, JobKind::OAuthRefresh { .. } | JobKind::OAuthExchange { .. }) {
+                    self.refreshing.remove(&account);
+                }
                 if let Some(state) = self.store.get_mut(&account) {
                     if matches!(e, mailcraft_core::Error::Connect(_) | mailcraft_core::Error::Auth(_) | mailcraft_core::Error::NotConnected) {
                         state.error = Some(e.to_string());
@@ -762,6 +842,20 @@ impl Session {
                 }
                 Ok(json!({"path": path, "subscribed": subscribed}))
             }
+            Output::Tokens(t) => {
+                state.error = None;
+                self.refreshing.remove(account);
+                let expires_at = t.expires_at;
+                self.secrets.set_tokens(account, Some(t));
+                let _ = self.save_config();
+                let signed_in = matches!(kind, JobKind::OAuthExchange { .. });
+                if signed_in {
+                    // First sign-in: load the folders and the inbox right away.
+                    let _ = self.submit("mail.sync", account, JobKind::Mailboxes);
+                    let _ = self.submit("mail.sync", account, JobKind::Envelopes { mailbox: "INBOX".into(), page: Page::new(0, page_size) });
+                }
+                Ok(json!({"account": account, "signed_in": signed_in, "expires_at": expires_at}))
+            }
             Output::Tested { mailboxes, smtp } => Ok(json!({
                 "ok": smtp.is_ok(),
                 "imap": "ok",
@@ -799,6 +893,9 @@ impl MailSession for Session {
     }
     fn has_password(&self, id: &str) -> bool {
         Session::has_password(self, id)
+    }
+    fn oauth_ready(&self) -> Vec<String> {
+        Session::oauth_ready(self)
     }
     fn jobs_pending(&self) -> usize {
         self.pending.len()
@@ -882,6 +979,7 @@ pub fn account_json(a: &Account, has_password: bool, state: Option<&AccountState
         "save_sent": a.save_sent,
         "trust_invalid_certs": a.trust_invalid_certs,
         "has_password": has_password,
+        "auth": if a.auth.is_empty() { "password" } else { a.auth.as_str() },
         "problems": a.problems(),
         "status": {
             "last_sync": state.map_or(0, |s| s.last_sync),
@@ -1061,6 +1159,79 @@ mod tests {
             let _ = s.pump();
         }
         assert_eq!(s.current().unwrap().mailboxes.len(), before + 1, "the new folder is listed");
+    }
+
+    #[test]
+    fn oauth_sign_in_then_refresh_logs_in_with_the_token() {
+        use std::io::{Read, Write};
+        let mock = MockBackend::new().require_password("access-c0de");
+        let m = mock.clone();
+        let mut s = Session::with_broker(Box::new(move |_| Box::new(m.clone())), Arc::new(MockBroker::default()), None);
+        // A Gmail address without a password signs in with Google.
+        let v = s.execute("account.add", &json!({"email": "anna@gmail.com", "name": "Anna"})).unwrap();
+        assert_eq!(v["account"]["auth"], "google");
+        assert_eq!(v["account"]["has_password"], false);
+        let id = v["id"].as_str().unwrap().to_string();
+        assert!(matches!(s.execute("mail.sync", &json!({})), Err(Error::NotSignedIn(_))));
+        // No client yet: the error says where to get one.
+        let e = s.execute("account.oauthStart", &json!({"id": id})).unwrap_err().to_string();
+        assert!(e.contains("oauth.configure") && e.contains("console.cloud.google.com"), "{e}");
+        assert!(s.oauth_ready().is_empty());
+        s.execute("oauth.configure", &json!({"provider": "google", "client_id": "cid", "client_secret": "sec"})).unwrap();
+        assert_eq!(s.oauth_ready(), vec!["google".to_string()]);
+        let p = s.execute("oauth.providers", &json!({})).unwrap();
+        assert_eq!(p["providers"][0]["configured"], true);
+        assert!(!p.to_string().contains("\"sec\"") && !p.to_string().contains("client_secret"), "the secret never leaves");
+        // Start: a URL to open and a listener on this machine.
+        let v = s.execute("account.oauthStart", &json!({"email": "anna@gmail.com"})).unwrap();
+        let url = v["url"].as_str().unwrap();
+        assert!(url.starts_with("https://accounts.google.com/") && url.contains("client_id=cid") && url.contains("login_hint=anna%40gmail.com"));
+        let redirect = v["redirect"].as_str().unwrap().to_string();
+        assert!(redirect.starts_with("http://127.0.0.1:"), "{redirect}");
+        let state = v["state"].as_str().unwrap().to_string();
+        assert!(s.execute("account.oauthFinish", &json!({"state": "nope", "code": "x"})).is_err());
+        assert!(s.execute("account.oauthFinish", &json!({"state": state, "error": "access_denied"})).unwrap_err().to_string().contains("refused"));
+        // The browser comes back through the loopback listener; pump finishes the sign-in.
+        let v = s.execute("account.oauthStart", &json!({"id": id})).unwrap();
+        let state = v["state"].as_str().unwrap().to_string();
+        let port: u16 = v["redirect"].as_str().unwrap().trim_start_matches("http://127.0.0.1:").trim_end_matches('/').parse().unwrap();
+        let mut c = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        c.write_all(format!("GET /?state={state}&code=c0de HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).unwrap();
+        let mut page = String::new();
+        let _ = c.read_to_string(&mut page);
+        assert!(page.contains("Accesso completato"));
+        let mut signed = false;
+        for _ in 0..300 {
+            for done in s.pump() {
+                if done.command == "account.oauthFinish" {
+                    assert_eq!(done.result.unwrap()["signed_in"], true);
+                    signed = true;
+                }
+            }
+            if signed && s.jobs_pending() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(signed, "the sign-in finished");
+        assert!(s.has_password(&id));
+        assert_eq!(s.secrets.tokens(&id).unwrap().access_token, "access-c0de");
+        assert!(!s.current().unwrap().mailboxes.is_empty(), "folders loaded after the sign-in");
+        assert!(mock.log().iter().any(|l| l == &format!("connect {id}")));
+        assert!(s.execute("account.list", &json!({})).unwrap()["accounts"][0]["has_password"] == true);
+        // An expired token is renewed before the next job (the mock accepts the renewed one).
+        mock.with_password("refreshed-refresh-c0de");
+        if let Some(t) = s.secrets.tokens.get_mut(&id) {
+            t.expires_at = 1;
+        }
+        s.run_blocking("mail.sync", json!({})).unwrap();
+        assert_eq!(s.secrets.tokens(&id).unwrap().access_token, "refreshed-refresh-c0de");
+        assert!(s.current().unwrap().error.is_none(), "{:?}", s.current().unwrap().error);
+        // A password switches the account back; removing drops the tokens.
+        s.execute("account.setPassword", &json!({"id": id, "password": "app-pw"})).unwrap();
+        assert_eq!(s.config().account(&id).unwrap().auth, "");
+        s.execute("account.remove", &json!({"id": id})).unwrap();
+        assert!(s.secrets.tokens(&id).is_none());
     }
 
     #[test]

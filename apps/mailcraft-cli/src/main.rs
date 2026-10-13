@@ -2,11 +2,13 @@
 //!
 //! ```text
 //! mailcraft-cli mcp [--demo]                        # MCP server on stdio, for AI agents
-//! mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open] [--users-dir DIR]   # the web app's server
+//! mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open] [--users-dir DIR] [--public-url URL]   # the web app's server
 //! mailcraft-cli mcp --server URL --token T                # MCP for one user of a multi-user server
 //! mailcraft-cli accounts                            # configured accounts and their status
 //! mailcraft-cli suggest EMAIL [--lang it]           # IMAP/SMTP settings for an address
 //! mailcraft-cli add EMAIL [--password PW] [--name N] [--imap host:port[:tls|starttls|none]] [--smtp host:port[:sec]] [--no-test]
+//! mailcraft-cli oauth google|microsoft CLIENT_ID [CLIENT_SECRET]   # the OAuth client created in the provider's console
+//! mailcraft-cli login EMAIL [--provider google|microsoft]   # sign in with Google / Microsoft in the browser
 //! mailcraft-cli test [ACCOUNT]                      # log in to IMAP and SMTP
 //! mailcraft-cli remove ACCOUNT
 //! mailcraft-cli set KEY VALUE                       # a preference (theme, language, sync_minutes…)
@@ -33,11 +35,13 @@ use serde_json::{Value, json};
 
 const USAGE: &str = "Usage:
   mailcraft-cli mcp [--demo]
-  mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open] [--users-dir DIR]
+  mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open] [--users-dir DIR] [--public-url URL]
   mailcraft-cli mcp --server URL --token USER_TOKEN
   mailcraft-cli accounts
   mailcraft-cli suggest EMAIL [--lang it]
   mailcraft-cli add EMAIL [--password PW] [--name N] [--imap host:port[:sec]] [--smtp host:port[:sec]] [--no-test]
+  mailcraft-cli oauth google|microsoft CLIENT_ID [CLIENT_SECRET]
+  mailcraft-cli login EMAIL [--provider google|microsoft]
   mailcraft-cli test [ACCOUNT]
   mailcraft-cli remove ACCOUNT
   mailcraft-cli set KEY VALUE
@@ -84,6 +88,21 @@ fn flags_all(args: &[String], key: &str) -> Vec<String> {
     args.iter().enumerate().filter(|(_, a)| *a == key).filter_map(|(i, _)| args.get(i + 1).cloned()).collect()
 }
 
+/// Opens a URL in the system browser (best effort).
+fn open_browser(url: &str) {
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return;
+    }
+    let (cmd, args): (&str, Vec<&str>) = if cfg!(target_os = "macos") {
+        ("open", vec![url])
+    } else if cfg!(windows) {
+        ("cmd", vec!["/C", "start", "", url])
+    } else {
+        ("xdg-open", vec![url])
+    };
+    let _ = std::process::Command::new(cmd).args(args).spawn();
+}
+
 fn session(o: &Opts) -> Session {
     if o.demo {
         return Session::demo();
@@ -93,7 +112,7 @@ fn session(o: &Opts) -> Session {
         None => Paths::default_dirs(),
     };
     let factory: BackendFactory = mailcraft_net::factory();
-    let mut s = Session::new(factory, Some(paths));
+    let mut s = Session::with_broker(factory, mailcraft_net::broker(), Some(paths));
     if let Some(l) = &o.lang {
         let _ = s.execute("prefs.set", &json!({"language": l}));
     }
@@ -169,6 +188,7 @@ fn run(raw: &[String]) -> Result<(), String> {
                     users_dir: flag(&tail, "--users-dir").map(std::path::PathBuf::from),
                     demo: o.demo,
                     lang: o.lang.clone(),
+                    public_url: flag(&tail, "--public-url").or_else(|| std::env::var("MAILCRAFT_PUBLIC_URL").ok()).filter(|u| !u.trim().is_empty()),
                 },
             )
         }
@@ -261,6 +281,59 @@ fn run(raw: &[String]) -> Result<(), String> {
             let t = s.run_blocking("account.test", json!({"id": id})).map_err(|e| e.to_string())?;
             println!("IMAP: {} ({} mailboxes)  SMTP: {}", t["imap"].as_str().unwrap_or(""), t["mailboxes"], t["smtp"].as_str().unwrap_or(""));
             Ok(())
+        }
+        Some("oauth") => {
+            let provider = args.get(1).ok_or(USAGE)?;
+            let client_id = args.get(2).cloned().unwrap_or_default();
+            let client_secret = args.get(3).cloned().unwrap_or_default();
+            let mut s = session(&o);
+            let v = s
+                .execute("oauth.configure", &json!({"provider": provider, "client_id": client_id, "client_secret": client_secret}))
+                .map_err(|e| e.to_string())?;
+            println!(
+                "{}: {}",
+                v["provider"].as_str().unwrap_or(provider),
+                if v["configured"] == true { "client configured" } else { "client removed" }
+            );
+            Ok(())
+        }
+        Some("login") => {
+            let email = args.get(1).ok_or(USAGE)?;
+            let tail = rest(2);
+            let mut s = session(&o);
+            if s.config().find(email).is_none() {
+                s.execute("account.add", &json!({"email": email})).map_err(|e| e.to_string())?;
+            }
+            let mut prm = json!({"email": email});
+            if let Some(p) = flag(&tail, "--provider") {
+                prm["provider"] = json!(p);
+            }
+            let v = s.execute("account.oauthStart", &prm).map_err(|e| e.to_string())?;
+            let url = v["url"].as_str().unwrap_or_default().to_string();
+            println!("Open this address in your browser and sign in (waiting up to 5 minutes):\n{url}");
+            open_browser(&url);
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(300) {
+                for done in s.pump() {
+                    if done.command == "account.oauthFinish" {
+                        done.result.map_err(|e| e.to_string())?;
+                        println!("Signed in as {email}.");
+                        // Let the first sync finish so the folders are cached.
+                        let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                        while s.jobs_pending() > 0 && std::time::Instant::now() < until {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                            let _ = s.pump();
+                        }
+                        let v = s.execute("account.list", &json!({})).map_err(|e| e.to_string())?;
+                        if let Some(a) = v["accounts"].as_array().and_then(|l| l.iter().find(|a| a["email"] == *email)) {
+                            println!("Folders: {} · unread {}", a["status"]["mailboxes"], a["status"]["unread"]);
+                        }
+                        return Ok(());
+                    }
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err("the sign-in did not finish in 5 minutes".into())
         }
         Some("test") => {
             let mut s = session(&o);

@@ -121,6 +121,10 @@ pub struct Account {
     /// Accept a server certificate that does not validate (self-hosted servers only).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub trust_invalid_certs: bool,
+    /// How the account logs in: `password` (empty = the same), or an OAuth provider id
+    /// (`google`, `microsoft`) whose tokens live in [`Secrets`].
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub auth: String,
 }
 
 const fn yes() -> bool {
@@ -142,6 +146,7 @@ impl Default for Account {
             folders: SpecialFolders::default(),
             save_sent: true,
             trust_invalid_certs: false,
+            auth: String::new(),
         }
     }
 }
@@ -150,6 +155,11 @@ impl Account {
     /// The login name: the explicit user name or the address.
     pub fn login(&self) -> &str {
         if self.username.trim().is_empty() { &self.email } else { &self.username }
+    }
+
+    /// The OAuth provider the account signs in with, if it does not use a password.
+    pub fn oauth_provider(&self) -> Option<&'static crate::oauth::Provider> {
+        if self.auth.is_empty() || self.auth == "password" { None } else { crate::oauth::provider(&self.auth) }
     }
 
     /// The `From:` display name.
@@ -340,16 +350,25 @@ pub struct Config {
     pub version: u32,
     pub accounts: Vec<Account>,
     pub preferences: Preferences,
+    /// OAuth clients by provider id (`google`, `microsoft`), created by the person in the
+    /// provider's console. The environment (`MAILCRAFT_GOOGLE_CLIENT_ID`…) is the fallback.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub oauth: crate::oauth::Clients,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Self { version: Self::VERSION, accounts: Vec::new(), preferences: Preferences::default() }
+        Self { version: Self::VERSION, accounts: Vec::new(), preferences: Preferences::default(), oauth: BTreeMap::new() }
     }
 }
 
 impl Config {
     pub const VERSION: u32 = 1;
+
+    /// The OAuth client for a provider: configured here, else from the environment.
+    pub fn oauth_client(&self, provider: &str) -> Option<crate::oauth::ClientCredentials> {
+        self.oauth.get(provider).filter(|c| !c.client_id.trim().is_empty()).cloned().or_else(|| crate::oauth::ClientCredentials::from_env(provider))
+    }
 
     pub fn account(&self, id: &str) -> Option<&Account> {
         self.accounts.iter().find(|a| a.id == id)
@@ -443,11 +462,43 @@ impl Config {
 #[serde(default)]
 pub struct Secrets {
     pub passwords: BTreeMap<AccountId, String>,
+    /// OAuth tokens of the accounts that sign in with a provider.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tokens: BTreeMap<AccountId, crate::oauth::Tokens>,
 }
 
 impl Secrets {
     pub fn password(&self, id: &str) -> Option<&str> {
         self.passwords.get(id).map(String::as_str).filter(|p| !p.is_empty())
+    }
+
+    pub fn tokens(&self, id: &str) -> Option<&crate::oauth::Tokens> {
+        self.tokens.get(id).filter(|t| !t.access_token.is_empty() || !t.refresh_token.is_empty())
+    }
+
+    pub fn set_tokens(&mut self, id: &str, tokens: Option<crate::oauth::Tokens>) {
+        match tokens {
+            Some(t) => {
+                self.tokens.insert(id.to_string(), t);
+            }
+            None => {
+                self.tokens.remove(id);
+            }
+        }
+    }
+
+    /// What logs the account in: its password, or its OAuth access token.
+    pub fn credential(&self, account: &Account) -> Option<&str> {
+        if account.oauth_provider().is_some() {
+            self.tokens(&account.id).map(|t| t.access_token.as_str()).filter(|t| !t.is_empty())
+        } else {
+            self.password(&account.id)
+        }
+    }
+
+    /// The account can log in (a password, or OAuth tokens).
+    pub fn has_credential(&self, account: &Account) -> bool {
+        if account.oauth_provider().is_some() { self.tokens(&account.id).is_some() } else { self.password(&account.id).is_some() }
     }
 
     pub fn set_password(&mut self, id: &str, password: &str) {

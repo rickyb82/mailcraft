@@ -12,6 +12,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 mail-parser = { workspace = true }
+sha2 = "0.10"
+getrandom = { version = "0.2", features = ["js"] }
 
 [dependencies.web-time]
 workspace = true

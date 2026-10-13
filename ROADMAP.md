@@ -32,11 +32,14 @@
 - Folders: IMAP subscriptions (LSUB/SUBSCRIBE, `mailbox.subscribe`), special-folder choice and
   new folders in the account form; sent mail copied to a Sent folder created when missing;
   `mail.close`.
+- OAuth sign-in for Google and Microsoft 365 (XOAUTH2, PKCE): client configured by the person
+  or the operator, consent in the browser, loopback redirect on the desktop and
+  `/api/oauth/callback` on the server, automatic token refresh, CLI `oauth`/`login`, MCP
+  `configure_oauth`/`sign_in`.
 
 ## Next (0.2)
 
 - Real-mailbox smoke tests on the main Italian providers (Aruba, Libero, PEC) and Gmail.
-- OAuth2 for Gmail and Microsoft 365 (XOAUTH2).
 - HTML rendering of messages (today HTML is reduced to text); inline images.
 - IMAP IDLE for push notifications; background sync in the desktop app.
 - Undo for archive/trash; snooze; labels/keywords (`$label`); PGP later.
@@ -55,5 +58,6 @@
 | 2026-10-13 | 0.1: model, autoconfig, IMAP/SMTP transport with in-process test servers, engine with commands and cache, Gmail-style egui UI, MCP server with configuration prompts, CLI |
 | 2026-10-13 | Web app: `MailSession` abstraction, snapshots by revision, `mailcraft-remote`, `mailcraft-cli serve` (HTTP API, static files, token), `apps/mailcraft-web` on GitHub Pages |
 | 2026-10-13 | Multi-user server for frameworks: `--users-dir`, service and per-user tokens, `/api/users`, MCP over the server (`mcp --server`), Dockerfile and compose, deploy guide |
+| 2026-10-13 | OAuth sign-in for Gmail and Microsoft 365: `core::oauth` (providers, PKCE, tokens, broker), XOAUTH2 on IMAP and SMTP, loopback listener, server callback, Settings section and account sign-in choice, CLI `oauth`/`login`, MCP tools, `docs/oauth.md` |
 | 2026-10-13 | Folder subscriptions and special-folder choice in the account form, Sent folder created when the server lacks one (copy failures reported), `mail.close` (the reader's X works on the web too), settings layout fixes (visible fields, no overlap) |
 | 2026-10-13 | Account switcher under the avatar; unified inbox across accounts (`account: "*"` in `mail.select`/`mail.list`/`mail.search`, account-tagged envelopes, *All accounts* in the navigation and the switcher, account chips in the list, *From* selector when composing) |

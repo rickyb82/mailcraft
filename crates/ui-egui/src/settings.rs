@@ -1,16 +1,19 @@
 //! Settings: accounts (add, edit, test, find servers), preferences, the assistant (MCP) and
 //! the keyboard shortcuts.
 
+use std::collections::HashMap;
+
 use egui::{Color32, RichText, Stroke, StrokeKind, vec2};
 use mailcraft_engine::core::account::{Account, Security};
 use mailcraft_engine::core::mailbox::Role;
+use mailcraft_engine::core::oauth;
 use serde_json::{Value, json};
 
 use crate::chrome::{avatar, color_for};
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 use crate::widgets::{icon_text_button, primary_button};
-use crate::{Language, MailApp, Screen};
+use crate::{Language, MailApp, Request, Screen};
 
 /// The account form.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -37,6 +40,8 @@ pub struct AccountForm {
     pub trash: String,
     pub spam: String,
     pub archive: String,
+    /// `""` = password, else an OAuth provider id (`google`, `microsoft`).
+    pub auth: String,
 }
 
 impl AccountForm {
@@ -67,6 +72,7 @@ impl AccountForm {
             trash: a.folders.trash.clone(),
             spam: a.folders.spam.clone(),
             archive: a.folders.archive.clone(),
+            auth: a.auth.clone(),
         }
     }
 
@@ -85,6 +91,13 @@ impl AccountForm {
                 .unwrap_or_else(|| mailcraft_engine::core::account::domain_of(&self.email).unwrap_or_default());
         }
         self.notes = v["notes"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+        // A Google or Microsoft address signs in with the provider unless a password was typed.
+        if let Some(o) = v["oauth"].as_str().filter(|o| !o.is_empty())
+            && self.auth.is_empty()
+            && self.password.is_empty()
+        {
+            self.auth = o.to_string();
+        }
     }
 
     fn params(&self) -> Value {
@@ -103,6 +116,7 @@ impl AccountForm {
             "trust_invalid_certs": self.trust_invalid_certs,
             "save_sent": self.save_sent,
             "folders": {"sent": self.sent, "drafts": self.drafts, "trash": self.trash, "spam": self.spam, "archive": self.archive},
+            "auth": if self.auth.is_empty() { "password" } else { self.auth.as_str() },
         });
         if !self.password.is_empty() {
             v["password"] = json!(self.password);
@@ -124,6 +138,10 @@ pub struct SettingsState {
     pub server_draft: Option<String>,
     /// The name of the folder being created.
     pub new_folder: String,
+    /// Start the OAuth sign-in as soon as the account is saved.
+    pub oauth_after_save: bool,
+    /// The OAuth client fields being typed, by provider: (client id, client secret).
+    pub oauth_clients: HashMap<String, (String, String)>,
 }
 
 fn section(ui: &mut egui::Ui, t: &Tokens, text: &str) {
@@ -168,6 +186,7 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                     account_form(app, ui, t);
                 } else {
                     preferences_section(app, ui, t);
+                    oauth_section(app, ui, t);
                     assistant_section(app, ui, t);
                     shortcuts_section(app, ui, t);
                 }
@@ -259,7 +278,50 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 ui.end_row();
             };
             row(ui, app.tr("E-mail address"), &mut f.email, false);
-            row(ui, app.tr("Password"), &mut f.password, true);
+            // Sign-in: a password, or the provider's OAuth (Google, Microsoft 365).
+            ui.label(RichText::new(app.tr("Sign-in")).color(t.muted));
+            let auth_label = |auth: &str| -> String {
+                match oauth::provider(auth) {
+                    Some(p) => p.name.to_string(),
+                    None => app.tr("Password").to_string(),
+                }
+            };
+            egui::ComboBox::from_id_salt("auth").selected_text(auth_label(&f.auth)).width(200.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut f.auth, String::new(), app.tr("Password"));
+                for p in &oauth::PROVIDERS {
+                    ui.selectable_value(&mut f.auth, p.id.to_string(), p.name);
+                }
+            });
+            ui.end_row();
+            if f.auth.is_empty() {
+                row(ui, app.tr("Password"), &mut f.password, true);
+            } else {
+                let provider = oauth::provider(&f.auth).map(|p| p.name).unwrap_or("OAuth");
+                let ready = app.session.oauth_ready().contains(&f.auth);
+                let signed = f.id.as_ref().is_some_and(|id| app.session.has_password(id));
+                ui.label("");
+                ui.horizontal(|ui| {
+                    if signed {
+                        ui.label(RichText::new(app.language.fill("Signed in with {provider}", &[("provider", provider)])).color(t.accent));
+                    }
+                    let label = if signed {
+                        app.tr("Sign in again").to_string()
+                    } else {
+                        app.language.fill("Sign in with {provider}", &[("provider", provider)])
+                    };
+                    if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
+                        action = Some("oauth");
+                    }
+                    if !ready {
+                        ui.label(
+                            RichText::new(app.language.fill("Configure the {provider} client below first", &[("provider", provider)]))
+                                .small()
+                                .color(t.muted),
+                        );
+                    }
+                });
+                ui.end_row();
+            }
             row(ui, app.tr("Name"), &mut f.name, false);
             row(ui, app.tr("Display name"), &mut f.display_name, false);
             row(ui, app.tr("Username (if not the address)"), &mut f.username, false);
@@ -319,6 +381,20 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
         );
     });
     match action {
+        Some("oauth") => {
+            app.settings.editing = Some(f.clone());
+            match &f.id {
+                Some(id) => {
+                    app.run("account.oauthStart", json!({"id": id, "provider": f.auth}));
+                }
+                None => {
+                    // Save first, then sign in (handle_result starts the flow).
+                    app.settings.oauth_after_save = true;
+                    app.run("account.add", f.params());
+                }
+            }
+            return;
+        }
         Some("suggest") => {
             // The answer reaches the form through MailApp::handle_result (local or remote).
             app.settings.editing = Some(f.clone());
@@ -471,6 +547,56 @@ fn icon_for(role: Role) -> Icon {
         Role::Starred => Icon::Star,
         _ => Icon::Folder,
     }
+}
+
+/// The OAuth clients for Google and Microsoft 365: where to create them, the fields to paste
+/// them in, the redirect to register.
+fn oauth_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
+    section(ui, t, app.tr("Sign in with Google or Microsoft 365 (OAuth)"));
+    let frame = egui::Frame::NONE.fill(t.card).stroke(Stroke::new(1.0, t.border)).corner_radius(10).inner_margin(16);
+    frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(app.tr("Gmail and Microsoft 365 mailboxes sign in through the provider, like in Thunderbird or Outlook, instead of a password. Each provider asks the app for a client: create it once in the provider's console (free, a few minutes), paste its id and secret here, then choose the provider as sign-in in the account form.")).color(t.ui_text));
+        let server = app.session.server();
+        let redirect = if server.is_empty() {
+            "http://127.0.0.1 (any port: Desktop app client)".to_string()
+        } else {
+            format!("{}/api/oauth/callback", server.trim_end_matches('/'))
+        };
+        ui.label(RichText::new(app.language.fill("Redirect URI to register: {uri}", &[("uri", &redirect)])).small().color(t.muted));
+        let ready = app.session.oauth_ready();
+        let italian = app.italian();
+        for p in &oauth::PROVIDERS {
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(p.name).strong().color(t.ui_text));
+                let configured = ready.iter().any(|r| r == p.id);
+                ui.label(
+                    RichText::new(app.tr(if configured { "Configured" } else { "Not configured" })).small().color(if configured { t.accent } else { t.muted }),
+                );
+                if ui.small_button(app.tr("Open the provider's console")).clicked() {
+                    app.requests.push(Request::OpenUrl(p.console.to_string()));
+                }
+            });
+            ui.label(RichText::new(if italian { p.note_it } else { p.note }).small().color(t.muted));
+            let (mut id, mut secret) = app.settings.oauth_clients.get(p.id).cloned().unwrap_or_default();
+            let mut changed = false;
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(app.tr("Client ID")).color(t.muted));
+                changed |= ui.add(egui::TextEdit::singleline(&mut id).desired_width(300.0)).changed();
+                ui.label(RichText::new(app.tr("Client secret")).color(t.muted));
+                changed |= ui.add(egui::TextEdit::singleline(&mut secret).password(true).desired_width(200.0)).changed();
+                if ui.add_enabled(!id.trim().is_empty(), egui::Button::new(app.tr("Save client"))).clicked() {
+                    app.run("oauth.configure", json!({"provider": p.id, "client_id": id.trim(), "client_secret": secret.trim()}));
+                    app.settings.oauth_clients.remove(p.id);
+                    app.settings.result = app.tr("Saved").to_string();
+                    changed = false;
+                } else if changed {
+                    app.settings.oauth_clients.insert(p.id.to_string(), (id.clone(), secret.clone()));
+                }
+            });
+        }
+    });
 }
 
 fn server_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {

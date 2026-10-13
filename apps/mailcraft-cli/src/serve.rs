@@ -27,6 +27,9 @@ pub struct Options {
     pub demo: bool,
     /// Language preference applied to new sessions (`en`, `it`).
     pub lang: Option<String>,
+    /// The URL browsers reach this server at (behind a proxy), for the OAuth callback; when
+    /// unset it comes from the request's `X-Forwarded-*` or `Host` headers.
+    pub public_url: Option<String>,
 }
 
 type Shared = Arc<Mutex<Session>>;
@@ -62,7 +65,7 @@ impl Hub {
         let session = if self.opts.demo {
             Session::demo()
         } else {
-            let mut s = Session::new(mailcraft_net::factory(), Some(Paths::under(&dir)));
+            let mut s = Session::with_broker(mailcraft_net::factory(), mailcraft_net::broker(), Some(Paths::under(&dir)));
             if let Some(l) = &self.opts.lang
                 && s.config().preferences.language.is_empty()
             {
@@ -220,6 +223,17 @@ fn read_request(stream: &mut TcpStream) -> Option<Request> {
     Some(Request { method, path, query, headers, body })
 }
 
+/// The URL browsers use for this server: configured, or from the proxy's headers, or `Host`.
+fn public_url(hub: &Hub, req: &Request) -> String {
+    if let Some(u) = &hub.opts.public_url {
+        return u.trim_end_matches('/').to_string();
+    }
+    let proto = header(req, "x-forwarded-proto").unwrap_or("http").split(',').next().unwrap_or("http").trim();
+    let host = header(req, "x-forwarded-host").or_else(|| header(req, "host")).unwrap_or("127.0.0.1:7878").split(',').next().unwrap_or("").trim();
+    let prefix = header(req, "x-forwarded-prefix").unwrap_or("").trim_end_matches('/');
+    format!("{proto}://{host}{prefix}")
+}
+
 fn header<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
     req.headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
 }
@@ -363,6 +377,16 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>) {
         }
         return;
     }
+    // The provider sends the browser back here after an OAuth sign-in (no token: the state
+    // of the flow is the proof, and only the session that started it accepts it).
+    if req.method == "GET" && req.path == "/api/oauth/callback" {
+        let params = mailcraft_engine::core::oauth::parse_callback(&req.query);
+        let prm = json!({"state": params.get("state").cloned().unwrap_or_default(), "code": params.get("code").cloned().unwrap_or_default(), "error": params.get("error").cloned().unwrap_or_default()});
+        let finished = hub.all_sessions().into_iter().any(|s| s.lock().map(|mut s| s.execute("account.oauthFinish", &prm).is_ok()).unwrap_or(false));
+        let page = if finished { mailcraft_engine::loopback::PAGE_OK } else { mailcraft_engine::loopback::PAGE_ERR };
+        respond(&mut stream, "200 OK", "text/html; charset=utf-8", page.as_bytes(), origin);
+        return;
+    }
     if req.method == "GET" && req.path == "/api/health" {
         json_response(
             &mut stream,
@@ -432,7 +456,11 @@ fn handle(mut stream: TcpStream, hub: Arc<Hub>) {
                 }
             };
             let command = body.get("command").and_then(Value::as_str).unwrap_or_default().to_string();
-            let params = body.get("params").cloned().unwrap_or_else(|| json!({}));
+            let mut params = body.get("params").cloned().unwrap_or_else(|| json!({}));
+            // A sign-in started through the server comes back to the server.
+            if command == "account.oauthStart" && params.get("redirect").and_then(Value::as_str).is_none_or(str::is_empty) {
+                params["redirect"] = json!(format!("{}/api/oauth/callback", public_url(&hub, &req)));
+            }
             let result = match session.lock() {
                 Ok(mut s) => s.execute(&command, &params).map_err(|e| e.to_string()),
                 Err(_) => Err("the session is unavailable".to_string()),
@@ -552,7 +580,7 @@ mod tests {
         std::thread::spawn(move || {
             let _ = run(
                 Session::demo(),
-                Options { bind: a, token: "t0k".into(), static_dir: None, open: false, users_dir: None, demo: false, lang: None },
+                Options { bind: a, token: "t0k".into(), static_dir: None, open: false, users_dir: None, demo: false, lang: None, public_url: None },
             );
         });
         for _ in 0..50 {
@@ -584,6 +612,31 @@ mod tests {
         assert!(v["error"].as_str().expect("error").contains("unknown command"));
         let v = post(&addr, "/api/cmd", "{");
         assert!(v["error"].as_str().expect("error").contains("invalid JSON"));
+        // OAuth through the server: the redirect is the server's own callback (from the Host
+        // header), which finishes the flow of the session that started it, without a token.
+        post(&addr, "/api/cmd", r#"{"command": "oauth.configure", "params": {"provider": "google", "client_id": "cid"}}"#);
+        let v = post(&addr, "/api/cmd", r#"{"command": "account.oauthStart", "params": {"id": "demo", "provider": "google"}}"#);
+        assert_eq!(v["result"]["redirect"], "http://x/api/oauth/callback", "{v}");
+        let state = v["result"]["state"].as_str().expect("state").to_string();
+        let (status, _) = get(&addr, "/api/oauth/callback?state=nope&code=x", "");
+        assert!(status.contains("200"));
+        let mut c = TcpStream::connect(&addr).expect("connect");
+        c.write_all(format!("GET /api/oauth/callback?state={state}&code=c0de HTTP/1.1\r\nHost: x\r\n\r\n").as_bytes()).expect("write");
+        let mut page = String::new();
+        c.read_to_string(&mut page).expect("read");
+        assert!(page.contains("Accesso completato"), "{page}");
+        std::thread::sleep(Duration::from_millis(400));
+        let (_, snap3) = get(&addr, "/api/snapshot?since=0", "t0k");
+        assert!(
+            snap3["completed"]
+                .as_array()
+                .expect("completed")
+                .iter()
+                .any(|c| c["command"] == "account.oauthFinish" && c["result"]["signed_in"] == true),
+            "{snap3}"
+        );
+        assert_eq!(snap3["oauth_ready"], serde_json::json!(["google"]));
+        assert!(snap3["config"]["accounts"].as_array().expect("accounts").iter().any(|a| a["id"] == "demo" && a["auth"] == "google"));
     }
 }
 
@@ -613,7 +666,7 @@ mod remote_tests {
         std::thread::spawn(move || {
             let _ = run(
                 Session::demo(),
-                Options { bind: a, token: String::new(), static_dir: None, open: false, users_dir: None, demo: false, lang: None },
+                Options { bind: a, token: String::new(), static_dir: None, open: false, users_dir: None, demo: false, lang: None, public_url: None },
             );
         });
         for _ in 0..50 {
@@ -680,7 +733,16 @@ mod multi_user_tests {
         std::thread::spawn(move || {
             let _ = run(
                 Session::demo(),
-                Options { bind: a, token: "svc".into(), static_dir: None, open: false, users_dir: Some(d), demo: true, lang: Some("it".into()) },
+                Options {
+                    bind: a,
+                    token: "svc".into(),
+                    static_dir: None,
+                    open: false,
+                    users_dir: Some(d),
+                    demo: true,
+                    lang: Some("it".into()),
+                    public_url: None,
+                },
             );
         });
         for _ in 0..50 {

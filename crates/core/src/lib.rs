@@ -13,6 +13,7 @@ pub mod mailbox;
 pub mod message;
 pub mod mime;
 pub mod mock;
+pub mod oauth;
 
 pub use account::{Account, AccountId, Config, Preferences, Secrets, Security, Server, SpecialFolders};
 pub use backend::{FlagChange, MailBackend, Page, SearchQuery};
