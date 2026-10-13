@@ -293,7 +293,16 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
             egui::ComboBox::from_id_salt("auth").selected_text(auth_label(&f.auth)).width(200.0).show_ui(ui, |ui| {
                 ui.selectable_value(&mut f.auth, String::new(), app.tr("Password"));
                 for p in &oauth::PROVIDERS {
-                    ui.selectable_value(&mut f.auth, p.id.to_string(), p.name);
+                    if ui.selectable_value(&mut f.auth, p.id.to_string(), p.name).changed() && !p.owns_host(&f.imap_host) {
+                        // A custom domain on Google Workspace / Microsoft 365: the provider's servers.
+                        let (imap, smtp) = p.servers();
+                        f.imap_host = imap.host;
+                        f.imap_port = imap.port.to_string();
+                        f.imap_security = imap.security;
+                        f.smtp_host = smtp.host;
+                        f.smtp_port = smtp.port.to_string();
+                        f.smtp_security = smtp.security;
+                    }
                 }
             });
             ui.end_row();

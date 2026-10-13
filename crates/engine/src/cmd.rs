@@ -539,6 +539,10 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             if account.auth.is_empty() && p::opt_str(prm, "auth").is_none() && p::opt_str(prm, "password").is_none_or(str::is_empty) {
                 account.auth = sg.oauth.unwrap_or_default().to_string();
             }
+            // An account that signs in with a provider uses the provider's servers (custom domains).
+            if let Some(provider) = account.oauth_provider() {
+                provider.apply_servers(&mut account);
+            }
             let id = s.config.upsert(account)?;
             if let Some(pw) = p::opt_str(prm, "password").filter(|p| !p.is_empty()) {
                 s.secrets.set_password(&id, pw);
@@ -566,6 +570,9 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
                 if p::opt_str(prm, "auth").is_none() {
                     updated.auth.clear();
                 }
+            }
+            if let Some(provider) = updated.oauth_provider() {
+                provider.apply_servers(&mut updated);
             }
             s.config.upsert(updated)?;
             s.save_config()?;
@@ -634,8 +641,9 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
                     provider.id.to_ascii_uppercase()
                 ))
             })?;
-            if account.auth != provider.id {
-                account.auth = provider.id.to_string();
+            let changed = account.auth != provider.id;
+            account.auth = provider.id.to_string();
+            if provider.apply_servers(&mut account) || changed {
                 s.config.upsert(account.clone())?;
                 s.save_config()?;
             }

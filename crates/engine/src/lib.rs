@@ -1182,6 +1182,11 @@ mod tests {
         let p = s.execute("oauth.providers", &json!({})).unwrap();
         assert_eq!(p["providers"][0]["configured"], true);
         assert!(!p.to_string().contains("\"sec\"") && !p.to_string().contains("client_secret"), "the secret never leaves");
+        // A Google Workspace domain: the guessed hosts give way to Google's servers.
+        let w = s.execute("account.add", &json!({"email": "anna@siriustec.it", "name": "Sirius", "auth": "google"})).unwrap();
+        assert_eq!(w["account"]["imap"]["host"], "imap.gmail.com", "{w}");
+        assert_eq!(w["account"]["smtp"]["host"], "smtp.gmail.com");
+        s.execute("account.remove", &json!({"id": w["id"]})).unwrap();
         // Start: a URL to open and a listener on this machine.
         let v = s.execute("account.oauthStart", &json!({"email": "anna@gmail.com"})).unwrap();
         let url = v["url"].as_str().unwrap();

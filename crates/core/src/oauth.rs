@@ -38,6 +38,12 @@ pub struct Provider {
     pub scope: &'static str,
     /// Address domains that always use this provider (custom domains are chosen by hand).
     pub domains: &'static [&'static str],
+    /// The provider's mail servers, used for every account that signs in with it (a Google
+    /// Workspace or Microsoft 365 custom domain has no servers of its own).
+    pub imap: (&'static str, u16),
+    pub smtp: (&'static str, u16, bool),
+    /// Host suffixes that belong to the provider.
+    pub hosts: &'static [&'static str],
     /// Where the client is created and what to pick there.
     pub console: &'static str,
     pub note: &'static str,
@@ -52,6 +58,9 @@ pub const PROVIDERS: [Provider; 2] = [
         token_url: "https://oauth2.googleapis.com/token",
         scope: "https://mail.google.com/",
         domains: &["gmail.com", "googlemail.com"],
+        imap: ("imap.gmail.com", 993),
+        smtp: ("smtp.gmail.com", 465, false),
+        hosts: &["gmail.com", "google.com", "googlemail.com"],
         console: "https://console.cloud.google.com/apis/credentials",
         note: "Google: create an OAuth client ID in Google Cloud Console (APIs & Services › Credentials › Create credentials › OAuth client ID; type Desktop app for the desktop client, Web application with the server's /api/oauth/callback URL for the web app), configure the consent screen with the scope https://mail.google.com/ and add yourself as a test user, then paste the client id and secret in MailCraft and sign in.",
         note_it: "Google: crea un ID client OAuth nella Google Cloud Console (API e servizi › Credenziali › Crea credenziali › ID client OAuth; tipo App desktop per il client desktop, Applicazione web con l'URL /api/oauth/callback del server per l'app web), configura la schermata di consenso con l'ambito https://mail.google.com/ e aggiungiti come utente di test, poi incolla id e segreto del client in MailCraft e accedi.",
@@ -63,11 +72,43 @@ pub const PROVIDERS: [Provider; 2] = [
         token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
         scope: "https://outlook.office.com/IMAP.AccessAsUser.All https://outlook.office.com/SMTP.Send offline_access",
         domains: &["outlook.com", "outlook.it", "hotmail.com", "hotmail.it", "live.com", "live.it", "msn.com"],
+        imap: ("outlook.office365.com", 993),
+        smtp: ("smtp.office365.com", 587, true),
+        hosts: &["office365.com", "outlook.com", "office.com"],
         console: "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade",
         note: "Microsoft: register an app in Entra ID (App registrations › New registration; redirect URI type Mobile and desktop applications with http://127.0.0.1 for the desktop client, Web with the server's /api/oauth/callback URL for the web app), add the API permissions IMAP.AccessAsUser.All, SMTP.Send and offline_access (Office 365 Exchange Online), create a client secret, then paste the application id and the secret in MailCraft and sign in.",
         note_it: "Microsoft: registra un'app in Entra ID (Registrazioni app › Nuova registrazione; URI di reindirizzamento di tipo Applicazioni per dispositivi mobili e desktop con http://127.0.0.1 per il client desktop, Web con l'URL /api/oauth/callback del server per l'app web), aggiungi le autorizzazioni IMAP.AccessAsUser.All, SMTP.Send e offline_access (Office 365 Exchange Online), crea un segreto client, poi incolla id dell'applicazione e segreto in MailCraft e accedi.",
     },
 ];
+
+impl Provider {
+    /// The host belongs to this provider (so an account can keep it).
+    pub fn owns_host(&self, host: &str) -> bool {
+        let h = host.trim().to_ascii_lowercase();
+        self.hosts.iter().any(|s| h == *s || h.ends_with(&format!(".{s}")))
+    }
+
+    /// The provider's IMAP and SMTP servers.
+    pub fn servers(&self) -> (crate::account::Server, crate::account::Server) {
+        use crate::account::{Security, Server};
+        (
+            Server::new(self.imap.0, self.imap.1, Security::Tls),
+            Server::new(self.smtp.0, self.smtp.1, if self.smtp.2 { Security::StartTls } else { Security::Tls }),
+        )
+    }
+
+    /// Points an account that signs in with this provider at the provider's servers, unless
+    /// it already uses them (a custom domain's guessed hosts never work).
+    pub fn apply_servers(&self, account: &mut crate::account::Account) -> bool {
+        if self.owns_host(&account.imap.host) && self.owns_host(&account.smtp.host) {
+            return false;
+        }
+        let (imap, smtp) = self.servers();
+        account.imap = imap;
+        account.smtp = smtp;
+        true
+    }
+}
 
 pub fn provider(id: &str) -> Option<&'static Provider> {
     let id = id.trim().to_ascii_lowercase();
@@ -402,6 +443,12 @@ mod tests {
         let q = parse_callback("?code=4%2FabC&state=s1&scope=https%3A%2F%2Fmail.google.com%2F");
         assert_eq!((q["code"].as_str(), q["state"].as_str()), ("4/abC", "s1"));
         assert_eq!(url_decode("a+b%zz"), "a b%zz");
+        assert!(google.owns_host("imap.gmail.com") && !google.owns_host("imap.siriustec.it"));
+        let mut a = crate::account::Account { email: "anna@siriustec.it".into(), auth: "google".into(), ..Default::default() };
+        a.imap = crate::account::Server::new("imap.siriustec.it", 993, crate::account::Security::Tls);
+        assert!(google.apply_servers(&mut a));
+        assert_eq!((a.imap.host.as_str(), a.smtp.host.as_str(), a.smtp.port), ("imap.gmail.com", "smtp.gmail.com", 465));
+        assert!(!google.apply_servers(&mut a), "already there");
         let mock = MockBroker::default();
         assert_eq!(mock.exchange(google, &client, "c", "v", "r").unwrap().access_token, "access-c");
         assert!(mock.exchange(google, &client, "bad", "v", "r").is_err());

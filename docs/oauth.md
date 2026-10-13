@@ -73,7 +73,8 @@ The client is stored in `config.json` under `oauth`; the secret never leaves the
 
 - **Desktop / web app:** add the account; a Gmail or Outlook address selects the provider as
   *Sign-in* automatically (choose it by hand for a Google Workspace or Microsoft 365 custom
-  domain). Press *Sign in with Google*: the browser opens, you approve, the page says you can
+  domain: the servers then become the provider's, `imap.gmail.com` / `smtp.gmail.com` or
+  `outlook.office365.com` / `smtp.office365.com`, whatever the domain). Press *Sign in with Google*: the browser opens, you approve, the page says you can
   close it, MailCraft loads the folders.
 - **CLI:** `mailcraft-cli login you@gmail.com` prints the URL, opens the browser and waits.
 - **Assistant:** "aggiungi la mia casella Gmail anna@gmail.com" → `add_account` → `sign_in`
