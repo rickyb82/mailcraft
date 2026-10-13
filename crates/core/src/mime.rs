@@ -140,8 +140,29 @@ pub fn markup_to_html(text: &str) -> String {
             }
             None => {
                 close_list(&mut out, &mut list);
-                out.push_str(&inline_markup(line));
-                out.push_str("<br>\n");
+                // Line-level marks: `{align=center}`, `{indent}` (repeatable) at the start.
+                let mut rest = trimmed;
+                let mut styles: Vec<String> = Vec::new();
+                loop {
+                    if let Some(r) = rest.strip_prefix("{indent}") {
+                        styles.push("margin-left:2em".into());
+                        rest = r.trim_start();
+                    } else if let Some(r) = rest.strip_prefix("{align=") {
+                        let Some((v, after)) = r.split_once('}') else { break };
+                        if matches!(v, "left" | "center" | "right" | "justify") {
+                            styles.push(format!("text-align:{v}"));
+                        }
+                        rest = after.trim_start();
+                    } else {
+                        break;
+                    }
+                }
+                if styles.is_empty() {
+                    out.push_str(&inline_markup(line));
+                    out.push_str("<br>\n");
+                } else {
+                    out.push_str(&format!("<div style=\"{}\">{}</div>\n", styles.join(";"), inline_markup(rest)));
+                }
             }
         }
     }
@@ -159,6 +180,9 @@ fn numbered_item(line: &str) -> Option<&str> {
 /// Does the text use the compose markup (so an HTML part is worth sending)?
 pub fn has_markup(text: &str) -> bool {
     text.contains("**")
+        || text.contains("{/")
+        || text.contains("{indent}")
+        || text.contains("{align=")
         || text.contains("__")
         || text.contains("](")
         || text.lines().any(|l| {
@@ -193,10 +217,40 @@ fn inline_markup(line: &str) -> String {
 }
 
 /// `**bold**`, `*italic*`, `__underline__` and bare links in text without brackets.
+/// `{color=#e53935}…{/color}`, `{size=large}…{/size}`, `{font=serif}…{/font}` as a span style.
+fn span_style(key: &str, value: &str) -> Option<String> {
+    let v = value.trim();
+    match key {
+        "color" => {
+            let hex = v.trim_start_matches('#');
+            (hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("color:#{hex}"))
+        }
+        "size" => match v {
+            "small" => Some("font-size:11px".into()),
+            "large" => Some("font-size:18px".into()),
+            "huge" => Some("font-size:24px".into()),
+            "normal" => Some("font-size:14px".into()),
+            _ => None,
+        },
+        "font" => match v {
+            "serif" => Some("font-family:Georgia,'Times New Roman',serif".into()),
+            "sans" => Some("font-family:Helvetica,Arial,sans-serif".into()),
+            "mono" => Some("font-family:Menlo,Consolas,monospace".into()),
+            _ => None,
+        },
+        "bg" => {
+            let hex = v.trim_start_matches('#');
+            (hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("background:#{hex}"))
+        }
+        _ => None,
+    }
+}
+
 fn spans(text: &str) -> String {
-    const MARKS: [(&str, &str); 3] = [("**", "b"), ("__", "u"), ("*", "i")];
+    const MARKS: [(&str, &str); 4] = [("**", "b"), ("__", "u"), ("*", "i"), ("{", "span")];
     let mut out = String::new();
-    let mut open = [false; 3];
+    let mut open = [false; 4];
+    let mut open_spans = 0usize;
     let mut rest = text;
     while !rest.is_empty() {
         let next = MARKS.iter().enumerate().filter_map(|(k, (m, _))| rest.find(m).map(|i| (i, k))).min();
@@ -204,6 +258,34 @@ fn spans(text: &str) -> String {
             out.push_str(&autolink(rest));
             break;
         };
+        if k == 3 {
+            // A styled span: `{key=value}` opens, `{/key}` closes; anything else is text.
+            out.push_str(&autolink(rest.get(..i).unwrap_or_default()));
+            let after = rest.get(i + 1..).unwrap_or_default();
+            let Some(close) = after.find('}') else {
+                out.push('{');
+                rest = after;
+                continue;
+            };
+            let inner = after.get(..close).unwrap_or_default();
+            rest = after.get(close + 1..).unwrap_or_default();
+            if let Some(key) = inner.strip_prefix('/') {
+                if open_spans > 0 && matches!(key, "color" | "size" | "font" | "bg") {
+                    open_spans -= 1;
+                    out.push_str("</span>");
+                } else {
+                    out.push_str(&escape_html(&format!("{{{inner}}}")));
+                }
+            } else if let Some((key, value)) = inner.split_once('=')
+                && let Some(style) = span_style(key, value)
+            {
+                open_spans += 1;
+                out.push_str(&format!("<span style=\"{style}\">"));
+            } else {
+                out.push_str(&escape_html(&format!("{{{inner}}}")));
+            }
+            continue;
+        }
         let (mark, tag) = MARKS[k];
         out.push_str(&autolink(rest.get(..i).unwrap_or_default()));
         rest = rest.get(i + mark.len()..).unwrap_or_default();
@@ -217,10 +299,13 @@ fn spans(text: &str) -> String {
         }
         open[k] = !open[k];
     }
-    for (k, is_open) in open.iter().enumerate() {
+    for (k, is_open) in open.iter().enumerate().take(3) {
         if *is_open {
             out.push_str(&format!("</{}>", MARKS[k].1));
         }
+    }
+    for _ in 0..open_spans {
+        out.push_str("</span>");
     }
     out
 }
@@ -721,6 +806,18 @@ mod tests {
         assert!(page.contains("<th>Da</th><td>Anna &lt;a@x.it&gt;</td>") && !page.contains("<th>A</th>"), "{page}");
         assert!(page.contains("<p>Ciao</p><b>fine</b>") && !page.contains("alert(1)") && page.contains("window.print()"));
         assert!(printable("t", &[], "", "x < y").contains("x &lt; y"));
+        // Styled spans and line marks (colour, size, font, alignment, indent).
+        let h = markup_to_html(
+            "{color=#e53935}rosso{/color} {size=large}grande{/size} {font=serif}serif{/font}\n{align=center}centro\n{indent}{indent}dentro\n{x} {/color}",
+        );
+        assert!(h.contains("<span style=\"color:#e53935\">rosso</span> <span style=\"font-size:18px\">grande</span>"), "{h}");
+        assert!(h.contains("<span style=\"font-family:Georgia,'Times New Roman',serif\">serif</span>"), "{h}");
+        assert!(
+            h.contains("<div style=\"text-align:center\">centro</div>") && h.contains("<div style=\"margin-left:2em;margin-left:2em\">dentro</div>"),
+            "{h}"
+        );
+        assert!(h.contains("{x} {/color}"), "unknown marks stay as text: {h}");
+        assert!(has_markup("{align=center}x") && has_markup("a {indent}"));
     }
 
     #[test]

@@ -56,6 +56,60 @@ pub fn list(text: &mut String, sel: Option<(usize, usize)>, numbered: bool) -> u
     text.get(..start).map_or(0, |s| s.chars().count()) + replacement.chars().count()
 }
 
+/// Wraps the selection in a styled span: `{key=value}…{/key}`.
+pub fn span(text: &mut String, sel: Option<(usize, usize)>, key: &str, value: &str) -> usize {
+    wrap(text, sel, &format!("{{{key}={value}}}"), &format!("{{/{key}}}"))
+}
+
+/// Puts a mark at the start of every line touched by the selection (alignment, indent).
+/// An alignment replaces a previous one; `{indent}` adds up.
+pub fn line_mark(text: &mut String, sel: Option<(usize, usize)>, mark: &str) -> usize {
+    let (a, b) = sel.unwrap_or((text.chars().count(), text.chars().count()));
+    let (ba, bb) = (byte_at(text, a), byte_at(text, b));
+    let start = text.get(..ba).and_then(|s| s.rfind('\n')).map_or(0, |i| i + 1);
+    let end = text.get(bb..).and_then(|s| s.find('\n')).map_or(text.len(), |i| bb + i);
+    let block = text.get(start..end).unwrap_or_default().to_string();
+    let lines: Vec<String> = block
+        .split('\n')
+        .map(|l| {
+            let mut l = l.to_string();
+            if mark.starts_with("{align=") {
+                while let Some(i) = l.find("{align=") {
+                    let Some(j) = l[i..].find('}') else { break };
+                    l.replace_range(i..i + j + 1, "");
+                }
+                if mark == "{align=left}" {
+                    return l.trim_start().to_string();
+                }
+            }
+            format!("{mark}{}", l.trim_start())
+        })
+        .collect();
+    let replacement = lines.join("\n");
+    text.replace_range(start..end, &replacement);
+    text.get(..start).map_or(0, |s| s.chars().count()) + replacement.chars().count()
+}
+
+/// Undo or redo the body's last edit through the text edit's own history.
+pub fn undo(ctx: &egui::Context, id: egui::Id, text: &mut String, redo: bool) -> bool {
+    let Some(mut state) = egui::TextEdit::load_state(ctx, id) else { return false };
+    let range = state.cursor.char_range().unwrap_or_default();
+    let current = (range, text.clone());
+    let mut undoer = state.undoer();
+    let previous = if redo { undoer.redo(&current).cloned() } else { undoer.undo(&current).cloned() };
+    state.set_undoer(undoer);
+    match previous {
+        Some((range, t)) => {
+            *text = t;
+            state.cursor.set_char_range(Some(range));
+            state.store(ctx, id);
+            ctx.memory_mut(|m| m.request_focus(id));
+            true
+        }
+        None => false,
+    }
+}
+
 /// `[selection](https://)` with the caret ready for the address.
 pub fn link(text: &mut String, sel: Option<(usize, usize)>) -> usize {
     let (a, b) = sel.unwrap_or((text.chars().count(), text.chars().count()));
@@ -86,5 +140,18 @@ mod tests {
         let mut k = "vedi qui".to_string();
         assert_eq!(link(&mut k, Some((5, 8))), 19);
         assert_eq!(k, "vedi [qui](https://)");
+        let mut c = "rosso e blu".to_string();
+        span(&mut c, Some((0, 5)), "color", "#e53935");
+        assert_eq!(c, "{color=#e53935}rosso{/color} e blu");
+        let mut a = "uno\ndue".to_string();
+        line_mark(&mut a, Some((0, 1)), "{align=center}");
+        assert_eq!(a, "{align=center}uno\ndue");
+        line_mark(&mut a, Some((0, 1)), "{align=right}");
+        assert_eq!(a, "{align=right}uno\ndue");
+        line_mark(&mut a, Some((0, 1)), "{align=left}");
+        assert_eq!(a, "uno\ndue");
+        line_mark(&mut a, Some((5, 6)), "{indent}");
+        line_mark(&mut a, Some((5, 6)), "{indent}");
+        assert_eq!(a, "uno\n{indent}{indent}due");
     }
 }

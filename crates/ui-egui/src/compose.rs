@@ -38,41 +38,249 @@ fn adopt_inline_images(c: &mut crate::Compose) {
     c.inline_from = None;
 }
 
-/// A markup action on the body: (text, selection) → the caret's new position.
-type Markup<'a> = &'a dyn Fn(&mut String, Option<(usize, usize)>) -> usize;
+/// The text colours offered by the colour picker (original palette).
+const COLORS: [(&str, &str); 12] = [
+    ("#000000", "Black"),
+    ("#5f6368", "Gray"),
+    ("#c5221f", "Red"),
+    ("#e37400", "Orange"),
+    ("#f9ab00", "Yellow"),
+    ("#188038", "Green"),
+    ("#007b83", "Teal"),
+    ("#1a73e8", "Blue"),
+    ("#8430ce", "Purple"),
+    ("#b31412", "Dark red"),
+    ("#0b5394", "Dark blue"),
+    ("#ffffff", "White"),
+];
 
-/// The formatting toolbar above the body: each button marks the selection up.
-fn toolbar(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, c: &mut crate::Compose, body_id: egui::Id) {
-    ui.horizontal(|ui| {
-        let ctx = ui.ctx().clone();
-        let sel = format::selection(&ctx, body_id);
-        let mut caret: Option<usize> = None;
-        let mut mark = |ui: &mut egui::Ui, label: RichText, tip: &str, f: Markup| {
-            if ui.small_button(label).on_hover_text(tip).clicked() {
-                caret = Some(f(&mut c.body, sel));
+/// A few emoji to drop into the text.
+const EMOJI: [&str; 24] =
+    ["😀", "😊", "😂", "😉", "😍", "🤔", "😎", "😢", "👍", "👎", "👋", "🙏", "👏", "💪", "🎉", "❤️", "🔥", "✅", "⭐", "📎", "📅", "☕", "🚀", "🙂"];
+
+/// Gmail's formatting row (shown by "Aa"): font, size, bold/italic/underline, text colour,
+/// alignment, lists, indent, undo/redo. Each button marks the selection up.
+fn format_row(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, c: &mut crate::Compose, body_id: egui::Id) {
+    let ctx = ui.ctx().clone();
+    let sel = format::selection(&ctx, body_id);
+    let mut caret: Option<usize> = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        // Font family and size: a value applies to the selection as a styled span.
+        let fonts = [("sans", "Sans Serif"), ("serif", "Serif"), ("mono", "Monospace")];
+        let mut font: Option<&str> = None;
+        egui::ComboBox::from_id_salt("compose-font").selected_text(RichText::new("Sans Serif").size(12.5)).width(96.0).show_ui(ui, |ui| {
+            for (key, name) in fonts {
+                if ui.selectable_label(false, name).clicked() {
+                    font = Some(key);
+                }
             }
-        };
-        mark(ui, RichText::new("B").strong(), app.tr("Bold"), &|b, s| format::wrap(b, s, "**", "**"));
-        mark(ui, RichText::new("I").italics(), app.tr("Italic"), &|b, s| format::wrap(b, s, "*", "*"));
-        mark(ui, RichText::new("U").underline(), app.tr("Underline"), &|b, s| format::wrap(b, s, "__", "__"));
-        mark(ui, RichText::new("•"), app.tr("Bulleted list"), &|b, s| format::list(b, s, false));
-        mark(ui, RichText::new("1."), app.tr("Numbered list"), &|b, s| format::list(b, s, true));
-        mark(ui, RichText::new("link").underline(), app.tr("Insert link"), &|b, s| format::link(b, s));
-        if let Some(i) = caret {
-            format::set_caret(&ctx, body_id, i);
+        });
+        if let Some(f) = font {
+            caret = Some(format::span(&mut c.body, sel, "font", f));
         }
-        if icon_button(ui, t, Icon::Image, app.tr("Insert image"), true, false).clicked() {
-            c.inline_from = Some(c.attachments.len());
-            app.requests.push(Request::AttachFiles);
+        let sizes = [("small", "Small"), ("normal", "Normal"), ("large", "Large"), ("huge", "Huge")];
+        let mut size: Option<&str> = None;
+        egui::ComboBox::from_id_salt("compose-size").selected_text(RichText::new("Tt").size(12.5)).width(52.0).show_ui(ui, |ui| {
+            for (key, name) in sizes {
+                if ui.selectable_label(false, app.tr(name)).clicked() {
+                    size = Some(key);
+                }
+            }
+        });
+        if let Some(s) = size {
+            caret = Some(format::span(&mut c.body, sel, "size", s));
         }
-        if icon_button(ui, t, Icon::Print, app.tr("Print"), true, false).clicked() {
-            app.compose = Some(c.clone());
-            app.print_compose();
+        if icon_button(ui, t, Icon::Bold, app.tr("Bold"), true, false).clicked() {
+            caret = Some(format::wrap(&mut c.body, sel, "**", "**"));
+        }
+        if icon_button(ui, t, Icon::Italic, app.tr("Italic"), true, false).clicked() {
+            caret = Some(format::wrap(&mut c.body, sel, "*", "*"));
+        }
+        if icon_button(ui, t, Icon::Underline, app.tr("Underline"), true, false).clicked() {
+            caret = Some(format::wrap(&mut c.body, sel, "__", "__"));
+        }
+        // Text colour: a palette popup.
+        let color_btn = icon_button(ui, t, Icon::TextColor, app.tr("Text color"), true, false);
+        let mut color: Option<&str> = None;
+        egui::Popup::menu(&color_btn).show(|ui| {
+            ui.set_min_width(170.0);
+            egui::Grid::new("compose-color-grid").spacing(vec2(4.0, 4.0)).show(ui, |ui| {
+                for (i, (hex, name)) in COLORS.iter().enumerate() {
+                    let (rect, resp) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::click());
+                    let rgb = egui::Color32::from_hex(hex).unwrap_or(t.ui_text);
+                    ui.painter().rect_filled(rect, 4.0, rgb);
+                    ui.painter().rect_stroke(rect, 4.0, Stroke::new(1.0, t.border), StrokeKind::Inside);
+                    if resp.on_hover_text(app.tr(name)).clicked() {
+                        color = Some(hex);
+                        ui.close();
+                    }
+                    if i % 6 == 5 {
+                        ui.end_row();
+                    }
+                }
+            });
+        });
+        if let Some(hex) = color {
+            caret = Some(format::span(&mut c.body, sel, "color", hex));
+        }
+        // Alignment: a popup with the three options.
+        let align_btn = icon_button(ui, t, Icon::AlignLeft, app.tr("Align"), true, false);
+        let mut align: Option<&str> = None;
+        egui::Popup::menu(&align_btn).show(|ui| {
+            ui.horizontal(|ui| {
+                for (icon, tip, mark) in [
+                    (Icon::AlignLeft, "Align left", "{align=left}"),
+                    (Icon::AlignCenter, "Align center", "{align=center}"),
+                    (Icon::AlignRight, "Align right", "{align=right}"),
+                ] {
+                    if icon_button(ui, t, icon, app.tr(tip), true, false).clicked() {
+                        align = Some(mark);
+                        ui.close();
+                    }
+                }
+            });
+        });
+        if let Some(m) = align {
+            caret = Some(format::line_mark(&mut c.body, sel, m));
+        }
+        if icon_button(ui, t, Icon::ListNumber, app.tr("Numbered list"), true, false).clicked() {
+            caret = Some(format::list(&mut c.body, sel, true));
+        }
+        if icon_button(ui, t, Icon::ListBullet, app.tr("Bulleted list"), true, false).clicked() {
+            caret = Some(format::list(&mut c.body, sel, false));
+        }
+        if icon_button(ui, t, Icon::Indent, app.tr("Indent"), true, false).clicked() {
+            caret = Some(format::line_mark(&mut c.body, sel, "{indent}"));
+        }
+        if icon_button(ui, t, Icon::Undo, app.tr("Undo"), true, false).clicked() {
+            format::undo(&ctx, body_id, &mut c.body, false);
+        }
+        if icon_button(ui, t, Icon::Redo, app.tr("Redo"), true, false).clicked() {
+            format::undo(&ctx, body_id, &mut c.body, true);
         }
         ui.add(egui::Label::new(RichText::new("?").small().color(t.muted)).sense(Sense::hover())).on_hover_text(
             app.tr("Formatting: **bold**, *italic*, __underline__, lists with - or 1., links [text](url); the message goes out as text and HTML"),
         );
     });
+    if let Some(i) = caret {
+        format::set_caret(&ctx, body_id, i);
+    }
+}
+
+/// Inserts `s` at the caret (or at the end) and puts the caret after it.
+fn insert_at_caret(ctx: &egui::Context, body_id: egui::Id, body: &mut String, s: &str) {
+    let sel = format::selection(ctx, body_id);
+    let caret = format::wrap(body, sel.map(|(a, _)| (a, a)), s, "");
+    format::set_caret(ctx, body_id, caret);
+}
+
+/// What the bottom row asked for.
+#[derive(Default)]
+struct Actions {
+    send: bool,
+    save: bool,
+    discard: bool,
+}
+
+/// Gmail's bottom row: Send (with a menu), "Aa", attach, link, emoji, image, signature, print,
+/// more, and the bin at the right.
+fn action_row(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, c: &mut crate::Compose, body_id: egui::Id) -> Actions {
+    let mut out = Actions::default();
+    let ctx = ui.ctx().clone();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        if primary_button(ui, t, Some(Icon::Send), app.tr("Send")).on_hover_text(app.tip("mail.send")).clicked() {
+            out.send = true;
+        }
+        let more_send = icon_button(ui, t, Icon::Chevron, app.tr("More send options"), true, false);
+        egui::Popup::menu(&more_send).align(egui::RectAlign::TOP_START).show(|ui| {
+            ui.set_min_width(160.0);
+            if ui.button(app.tr("Send")).clicked() {
+                out.send = true;
+                ui.close();
+            }
+            if ui.button(app.tip("draft.save")).clicked() {
+                out.save = true;
+                ui.close();
+            }
+        });
+        ui.add_space(6.0);
+        if icon_button(ui, t, Icon::TextFormat, app.tr("Formatting options"), true, !c.hide_format).clicked() {
+            c.hide_format = !c.hide_format;
+        }
+        if icon_button(ui, t, Icon::Attachment, app.tr("Attach files"), true, false).clicked() {
+            app.requests.push(Request::AttachFiles);
+        }
+        if icon_button(ui, t, Icon::Link, app.tr("Insert link"), true, false).clicked() {
+            let sel = format::selection(&ctx, body_id);
+            let caret = format::link(&mut c.body, sel);
+            format::set_caret(&ctx, body_id, caret);
+        }
+        let emoji_btn = icon_button(ui, t, Icon::Emoji, app.tr("Insert emoji"), true, false);
+        let mut emoji: Option<&str> = None;
+        egui::Popup::menu(&emoji_btn).align(egui::RectAlign::TOP_START).show(|ui| {
+            ui.set_min_width(220.0);
+            egui::Grid::new("compose-emoji-grid").spacing(vec2(2.0, 2.0)).show(ui, |ui| {
+                for (i, e) in EMOJI.iter().enumerate() {
+                    if ui.add(egui::Button::new(RichText::new(*e).size(16.0)).frame(false)).clicked() {
+                        emoji = Some(e);
+                        ui.close();
+                    }
+                    if i % 8 == 7 {
+                        ui.end_row();
+                    }
+                }
+            });
+        });
+        if let Some(e) = emoji {
+            insert_at_caret(&ctx, body_id, &mut c.body, e);
+        }
+        if icon_button(ui, t, Icon::Image, app.tr("Insert image"), true, false).clicked() {
+            c.inline_from = Some(c.attachments.len());
+            app.requests.push(Request::AttachFiles);
+        }
+        if icon_button(ui, t, Icon::Signature, app.tr("Insert signature"), true, false).clicked() {
+            let signature = app
+                .session
+                .account(&c.from_account)
+                .or_else(|| app.session.account(&app.session.view().account))
+                .map(|a| a.signature_text())
+                .unwrap_or_default();
+            if signature.is_empty() {
+                app.status = app.tr("No signature set for this account: add one in Settings").to_string();
+            } else {
+                insert_at_caret(&ctx, body_id, &mut c.body, &format!("\n\n{signature}\n"));
+            }
+        }
+        if icon_button(ui, t, Icon::Print, app.tr("Print"), true, false).clicked() {
+            app.compose = Some(c.clone());
+            app.print_compose();
+        }
+        let more_btn = icon_button(ui, t, Icon::More, app.tr("More options"), true, false);
+        egui::Popup::menu(&more_btn).align(egui::RectAlign::TOP_START).show(|ui| {
+            ui.set_min_width(160.0);
+            if ui.button(app.tip("draft.save")).clicked() {
+                out.save = true;
+                ui.close();
+            }
+            if ui.button(app.tr("Print")).clicked() {
+                app.compose = Some(c.clone());
+                app.print_compose();
+                ui.close();
+            }
+            if ui.button(app.tr("Discard")).clicked() {
+                out.discard = true;
+                ui.close();
+            }
+        });
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if icon_button(ui, t, Icon::Trash, app.tr("Discard"), true, false).clicked() {
+                out.discard = true;
+            }
+        });
+    });
+    out
 }
 
 /// A recipients field with completion: while a name or address is typed after the last comma,
@@ -241,7 +449,9 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                     field(ui, "", &mut c.subject, app.tr("Subject"));
                     ui.add_space(4.0);
                     let body_id = egui::Id::new("compose-body");
-                    toolbar(app, ui, t, &mut c, body_id);
+                    if !c.hide_format {
+                        format_row(app, ui, t, &mut c, body_id);
+                    }
                     let body = ui.add(
                         egui::TextEdit::multiline(&mut c.body)
                             .id(body_id)
@@ -325,22 +535,10 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                         });
                     }
                     ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if primary_button(ui, t, Some(Icon::Send), app.tr("Send")).on_hover_text(app.tip("mail.send")).clicked() {
-                            send = true;
-                        }
-                        if icon_button(ui, t, Icon::Attachment, app.tr("Attach files"), true, false).clicked() {
-                            app.requests.push(Request::AttachFiles);
-                        }
-                        if icon_button(ui, t, Icon::Save, &app.tip("draft.save"), true, false).clicked() {
-                            save = true;
-                        }
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if icon_button(ui, t, Icon::Trash, app.tr("Discard"), true, false).clicked() {
-                                discard = true;
-                            }
-                        });
-                    });
+                    let actions = action_row(app, ui, t, &mut c, body_id);
+                    send = actions.send;
+                    save = actions.save;
+                    discard = actions.discard;
                 });
             });
     });

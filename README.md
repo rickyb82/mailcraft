@@ -42,9 +42,11 @@ triage and answer your mail. Part of the *craft* family (`gridcraft`, `ideacraft
   (`--assist-url`), the web app shows up to five suggested replies under each message and a
   *Write with the assistant* box in the compose window; local models only unless you allow the
   cloud.
-- **Write like on Gmail** — a formatting bar (bold, italic, underline, lists, links, inline
-  images) on a light markup that goes out as text + HTML; a print button for any message or
-  draft; the compose window drags anywhere so what is behind it stays readable.
+- **Write like on Gmail** — the same two toolbars: font, size, bold, italic, underline, text
+  colour, alignment, lists, indent, undo/redo above the text (toggled by "Aa"), and Send with
+  its menu, attach, link, emoji, image, signature, print and more below it, on a light markup
+  that goes out as text + HTML; a print button for any message or draft; the compose window
+  drags anywhere so what is behind it stays readable.
 - **Signatures with a logo, recipients that complete themselves** — paste the HTML of your
   signature (logo, bold, links): messages go out as text + HTML with the logo inline, replies
   and forwards included. While you type a recipient, the people seen in your mail or written

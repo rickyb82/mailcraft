@@ -101,6 +101,8 @@ pub struct Compose {
     pub quote: String,
     /// The next picked files are images to show inline; attachments before this index are files.
     pub inline_from: Option<usize>,
+    /// The formatting row ("Aa") is shown above the text unless hidden.
+    pub hide_format: bool,
 }
 
 /// The whole app state the UI keeps on top of the engine session.
