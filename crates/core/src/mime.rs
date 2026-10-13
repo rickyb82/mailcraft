@@ -80,8 +80,81 @@ pub fn attachments(raw: &[u8]) -> Vec<DraftAttachment> {
                 })
                 .unwrap_or_else(|| "application/octet-stream".into()),
             data: part.contents().to_vec(),
+            cid: String::new(),
         })
         .collect()
+}
+
+/// Escapes text for HTML and turns lines into `<br>` (links become anchors).
+pub fn text_to_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    for (i, line) in text.lines().take(20_000).enumerate() {
+        if i > 0 {
+            out.push_str("<br>\n");
+        }
+        for word in line.split(' ').enumerate().map(|(j, w)| (j > 0, w)) {
+            if word.0 {
+                out.push(' ');
+            }
+            let w = word.1;
+            if (w.starts_with("https://") || w.starts_with("http://")) && w.len() > 8 {
+                let url = w.trim_end_matches(['.', ',', ';', ')', '>']);
+                let tail = &w[url.len()..];
+                out.push_str(&format!("<a href=\"{}\">{}</a>{}", escape_html(url), escape_html(url), escape_html(tail)));
+            } else {
+                out.push_str(&escape_html(w));
+            }
+        }
+    }
+    format!("<div style=\"font-family:Helvetica,Arial,sans-serif;font-size:14px;white-space:pre-wrap\">{out}</div>")
+}
+
+pub fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Turns `<img src="data:image/png;base64,…">` in the HTML body into inline attachments
+/// referenced by `cid:`, which every mail client shows (data URIs most do not).
+pub fn inline_data_images(draft: &mut Draft) {
+    let mut html = String::with_capacity(draft.html.len());
+    let mut rest = draft.html.as_str();
+    let mut n = 0usize;
+    while let Some(i) = rest.find("data:image/") {
+        let before = rest.get(..i).unwrap_or_default();
+        let quote = before.chars().last();
+        let after = rest.get(i..).unwrap_or_default();
+        let end = match quote {
+            Some(q @ ('"' | '\'')) => after.find(q),
+            _ => after.find(['"', '\'', ' ', ')', '>']),
+        }
+        .unwrap_or(after.len());
+        let uri = after.get(..end).unwrap_or_default();
+        html.push_str(before);
+        match uri.split_once(";base64,").and_then(|(head, data)| base64_decode(data.trim()).map(|bytes| (head, bytes))) {
+            Some((head, bytes)) if n < 50 && bytes.len() <= 5 * 1024 * 1024 => {
+                n += 1;
+                let mime = head.trim_start_matches("data:").to_ascii_lowercase();
+                let ext = mime.rsplit('/').next().unwrap_or("png").split('+').next().unwrap_or("png");
+                let cid = format!("image{n}@mailcraft");
+                draft.attachments.push(DraftAttachment { name: format!("image{n}.{ext}"), mime, data: bytes, cid: cid.clone() });
+                html.push_str(&format!("cid:{cid}"));
+            }
+            _ => html.push_str(uri),
+        }
+        rest = after.get(end..).unwrap_or_default();
+    }
+    html.push_str(rest);
+    draft.html = html;
 }
 
 /// Parses only the headers (what the list fetch returns) into an envelope.
@@ -318,8 +391,24 @@ fn header_addresses(list: &[Address]) -> String {
     list.iter().map(header_address).collect::<Vec<_>>().join(",\r\n ")
 }
 
-/// Builds the RFC 822 bytes of a draft: UTF-8 text body (base64), attachments as
-/// multipart/mixed. `message_id` should be unique (`<time.random@domain>`).
+/// One MIME part: its headers, a blank line, its encoded content.
+fn part(content_type: &str, extra_headers: &str, data: &[u8]) -> String {
+    format!("Content-Type: {content_type}\r\n{extra_headers}Content-Transfer-Encoding: base64\r\n\r\n{}", base64_lines(data))
+}
+
+/// Wraps parts in a multipart container.
+fn multipart(kind: &str, boundary: &str, parts: &[String]) -> String {
+    let mut out = format!("Content-Type: multipart/{kind}; boundary=\"{boundary}\"\r\n\r\n");
+    for p in parts {
+        out.push_str(&format!("--{boundary}\r\n{p}\r\n"));
+    }
+    out.push_str(&format!("--{boundary}--\r\n"));
+    out
+}
+
+/// Builds the RFC 822 bytes of a draft: UTF-8 text body (base64), an HTML alternative when
+/// `html` is set, inline images (`cid`) in multipart/related, files as multipart/mixed.
+/// `message_id` should be unique (`<time.random@domain>`).
 pub fn build(draft: &Draft, from: &Address, date: i64, message_id: &str) -> Result<Vec<u8>> {
     if draft.to.is_empty() && draft.cc.is_empty() && draft.bcc.is_empty() {
         return Err(Error::Message("the message has no recipient".into()));
@@ -347,28 +436,56 @@ pub fn build(draft: &Draft, from: &Address, date: i64, message_id: &str) -> Resu
         h.push_str(&format!("References: {}\r\n", draft.references.iter().map(|r| normalise_id(r)).collect::<Vec<_>>().join("\r\n ")));
     }
     h.push_str("MIME-Version: 1.0\r\nX-Mailer: MailCraft\r\n");
-    let body_part =
-        format!("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n{}", base64_lines(draft.body.as_bytes()));
-    let mut out = h.into_bytes();
-    if draft.attachments.is_empty() {
-        out.extend_from_slice(body_part.as_bytes());
-        return Ok(out);
-    }
-    let boundary = format!("=_MailCraft_{:x}_{:x}", date, draft.attachments.len());
-    out.extend_from_slice(format!("Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n").as_bytes());
-    out.extend_from_slice(format!("--{boundary}\r\n{body_part}").as_bytes());
-    for a in draft.attachments.iter().take(limits::MAX_ATTACHMENTS) {
+    let boundary = |tag: &str| format!("=_MailCraft_{tag}_{:x}_{:x}", date, draft.attachments.len());
+    let safe = |a: &DraftAttachment| {
         let name = encode_header_text(&a.name.replace(['"', '\r', '\n'], "")).replace(' ', "_");
         let mime = if a.mime.contains('/') { a.mime.to_ascii_lowercase() } else { "application/octet-stream".to_string() };
-        out.extend_from_slice(
-            format!(
-                "--{boundary}\r\nContent-Type: {mime}; name=\"{name}\"\r\nContent-Disposition: attachment; filename=\"{name}\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{}",
-                base64_lines(&a.data)
-            )
-            .as_bytes(),
-        );
+        (name, mime)
+    };
+    // The text, or text + HTML alternatives.
+    let mut body = part("text/plain; charset=utf-8", "", draft.body.as_bytes());
+    if !draft.html.trim().is_empty() {
+        let html = part("text/html; charset=utf-8", "", draft.html.as_bytes());
+        body = multipart("alternative", &boundary("alt"), &[body, html]);
     }
-    out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    // Inline images travel with the HTML in multipart/related.
+    let inline: Vec<String> = draft
+        .attachments
+        .iter()
+        .filter(|a| !a.cid.is_empty())
+        .take(limits::MAX_ATTACHMENTS)
+        .map(|a| {
+            let (name, mime) = safe(a);
+            part(
+                &format!("{mime}; name=\"{name}\""),
+                &format!("Content-ID: <{}>\r\nContent-Disposition: inline; filename=\"{name}\"\r\n", a.cid.replace(['<', '>', '\r', '\n'], "")),
+                &a.data,
+            )
+        })
+        .collect();
+    if !inline.is_empty() {
+        let mut parts = vec![body];
+        parts.extend(inline);
+        body = multipart("related", &boundary("rel"), &parts);
+    }
+    // Files as multipart/mixed.
+    let files: Vec<String> = draft
+        .attachments
+        .iter()
+        .filter(|a| a.cid.is_empty())
+        .take(limits::MAX_ATTACHMENTS)
+        .map(|a| {
+            let (name, mime) = safe(a);
+            part(&format!("{mime}; name=\"{name}\""), &format!("Content-Disposition: attachment; filename=\"{name}\"\r\n"), &a.data)
+        })
+        .collect();
+    if !files.is_empty() {
+        let mut parts = vec![body];
+        parts.extend(files);
+        body = multipart("mixed", &boundary("mix"), &parts);
+    }
+    let mut out = h.into_bytes();
+    out.extend_from_slice(body.as_bytes());
     Ok(out)
 }
 
@@ -434,6 +551,7 @@ mod tests {
                 name: "agenda.txt".into(),
                 mime: "text/plain".into(),
                 data: b"1. saluti\n2. piano".to_vec(),
+                cid: String::new(),
             }],
             ..Draft::default()
         };
@@ -457,5 +575,46 @@ mod tests {
         assert!(base64_decode("@@").is_none());
         let q = quote(&m, true);
         assert!(q.contains("ha scritto:") && q.contains("> Ciao a tutti,"));
+    }
+
+    #[test]
+    fn html_bodies_with_inline_images_and_files() {
+        // A 1x1 PNG as a data URI: it becomes a cid part that every client shows.
+        let png = base64_encode(&[0x89, b'P', b'N', b'G', 0, 1, 2, 3]);
+        let mut draft = Draft {
+            to: vec![Address::new("Luca", "luca@example.com")],
+            subject: "Firma".into(),
+            body: "Ciao,\nvedi https://example.it/x.\n\n-- \nAnna".into(),
+            html: format!(
+                "{}<br><br>-- <br><b>Anna Rossi</b> <a href=\"https://sirius.example\">Sirius</a><img src=\"data:image/png;base64,{png}\" alt=\"logo\">",
+                text_to_html("Ciao,\nvedi https://example.it/x.")
+            ),
+            attachments: vec![crate::message::DraftAttachment {
+                name: "doc.pdf".into(),
+                mime: "application/pdf".into(),
+                data: b"%PDF".to_vec(),
+                cid: String::new(),
+            }],
+            ..Draft::default()
+        };
+        inline_data_images(&mut draft);
+        assert_eq!(draft.attachments.len(), 2);
+        assert_eq!(draft.attachments[1].cid, "image1@mailcraft");
+        assert!(draft.html.contains("src=\"cid:image1@mailcraft\"") && !draft.html.contains("data:image"));
+        let raw = build(&draft, &Address::new("Anna", "anna@example.com"), 1_700_000_000, "<h1@example.com>").unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("multipart/mixed") && text.contains("multipart/related") && text.contains("multipart/alternative"));
+        assert!(text.contains("Content-ID: <image1@mailcraft>"));
+        let m = parse(&raw).unwrap();
+        assert_eq!(m.text.trim(), draft.body.trim());
+        assert!(m.html.contains("<b>Anna Rossi</b>") && m.html.contains("cid:image1@mailcraft"));
+        assert!(m.html.contains("<a href=\"https://example.it/x\">https://example.it/x</a>."));
+        let listed: Vec<&str> = m.attachments.iter().filter(|a| !a.inline).map(|a| a.name.as_str()).collect();
+        assert_eq!(listed, vec!["doc.pdf"], "the logo is inline, not a file: {:?}", m.attachments);
+        assert!(m.envelope.has_attachments);
+        assert_eq!(
+            text_to_html("a < b & \"c\""),
+            "<div style=\"font-family:Helvetica,Arial,sans-serif;font-size:14px;white-space:pre-wrap\">a &lt; b &amp; &quot;c&quot;</div>"
+        );
     }
 }

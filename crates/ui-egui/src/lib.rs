@@ -92,6 +92,9 @@ pub struct MailApp {
     expanded: Vec<u32>,
     /// Settings opened only because no account existed yet: leave it once one appears.
     auto_settings: bool,
+    /// Recipient completion: the prefix asked for and the matches (display, address).
+    pub contact_query: String,
+    pub contact_hits: Vec<(String, String)>,
 }
 
 impl MailApp {
@@ -120,6 +123,8 @@ impl MailApp {
             reading_full: false,
             expanded: Vec::new(),
             auto_settings: screen == Screen::Settings,
+            contact_query: String::new(),
+            contact_hits: Vec::new(),
         }
     }
 
@@ -183,6 +188,15 @@ impl MailApp {
                     );
                     self.settings.result = text.clone();
                     self.status = text;
+                }
+            }
+            "contacts.search" => {
+                // Only the answer to the prefix still typed matters.
+                if v["query"].as_str() == Some(self.contact_query.as_str()) {
+                    self.contact_hits = v["contacts"]
+                        .as_array()
+                        .map(|l| l.iter().filter_map(|c| Some((c["display"].as_str()?.to_string(), c["email"].as_str()?.to_string()))).collect())
+                        .unwrap_or_default();
                 }
             }
             "mail.attachment" => {
@@ -292,7 +306,7 @@ impl MailApp {
         for c in done {
             match c.result {
                 Ok(v) => match c.command.as_str() {
-                    "account.suggest" | "account.add" | "account.update" | "account.oauthStart" | "mail.attachment" => {
+                    "account.suggest" | "account.add" | "account.update" | "account.oauthStart" | "mail.attachment" | "contacts.search" => {
                         self.handle_result(&c.command, &v)
                     }
                     "account.oauthFinish" => {
@@ -467,6 +481,12 @@ impl MailApp {
                 self.reading_full = false;
             }
         }
+    }
+
+    /// Replaces the recipient being typed (the text after the last comma) with `display`.
+    pub fn complete_recipient(value: &mut String, display: &str) {
+        let keep = value.rfind(',').map(|i| value[..=i].to_string()).unwrap_or_default();
+        *value = if keep.is_empty() { format!("{display}, ") } else { format!("{} {display}, ", keep.trim_end()) };
     }
 
     pub fn compose_new(&mut self) {
@@ -849,6 +869,16 @@ mod tests {
         assert_eq!(app.session.view().selection.len(), 1);
         frame(&mut app, &ctx, vec![key(egui::Key::C, egui::Modifiers::NONE)]);
         assert!(app.compose.is_some());
+        // Recipient completion from the people seen in mail.
+        app.contact_query = "luc".into();
+        app.run("contacts.search", json!({"query": "luc"}));
+        assert_eq!(app.contact_hits.first().map(|h| h.1.as_str()), Some("luca@example.com"));
+        let mut to = "anna@example.it, luc".to_string();
+        MailApp::complete_recipient(&mut to, &app.contact_hits[0].0);
+        assert_eq!(to, "anna@example.it, Luca Bianchi <luca@example.com>, ");
+        let mut to = "luc".to_string();
+        MailApp::complete_recipient(&mut to, "Luca <luca@example.com>");
+        assert_eq!(to, "Luca <luca@example.com>, ");
         frame(&mut app, &ctx, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
         assert!(app.compose.as_ref().is_some_and(|c| c.minimized));
         app.compose = None;

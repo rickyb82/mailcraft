@@ -152,7 +152,9 @@ impl MockBackend {
                 to: vec![me.clone()],
                 subject: subject.into(),
                 body: body.into(),
-                attachments: att.map(|(n, m)| vec![DraftAttachment { name: n.into(), mime: m.into(), data: b"demo".to_vec() }]).unwrap_or_default(),
+                attachments: att
+                    .map(|(n, m)| vec![DraftAttachment { name: n.into(), mime: m.into(), data: b"demo".to_vec(), cid: String::new() }])
+                    .unwrap_or_default(),
                 ..Draft::default()
             };
             b.put_draft("INBOX", &from, &draft, now - ago, flags);

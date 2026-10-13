@@ -813,6 +813,14 @@ impl Session {
                 Ok(json!({"mailbox": mailbox, "query": query.text, "envelopes": list.iter().map(envelope_json).collect::<Vec<_>>()}))
             }
             Output::Sent { message_id, copied_to, copy_error } => {
+                // The people written to come first when completing recipients.
+                if let JobKind::Send { to, .. } = &kind {
+                    let addrs: Vec<mailcraft_core::message::Address> = to.iter().map(|t| mailcraft_core::message::Address::new("", t)).collect();
+                    state.note_addresses(addrs.iter(), time::now(), 3);
+                }
+                if let JobKind::Respond { forward_to, .. } = &kind {
+                    state.note_addresses(forward_to.iter(), time::now(), 3);
+                }
                 if let JobKind::Send { answered: Some((mb, uid)), .. } | JobKind::Respond { mailbox: mb, uid, .. } = &kind {
                     state.apply_flag(mb, &[*uid], FlagChange::Answered(true));
                 }
@@ -974,6 +982,7 @@ pub fn account_json(a: &Account, has_password: bool, state: Option<&AccountState
         "imap": {"host": a.imap.host, "port": a.imap.port, "security": a.imap.security.name()},
         "smtp": {"host": a.smtp.host, "port": a.smtp.port, "security": a.smtp.security.name()},
         "signature": a.signature,
+        "signature_html": a.signature_html,
         "color": a.color,
         "folders": {"sent": a.folders.sent, "drafts": a.folders.drafts, "trash": a.folders.trash, "spam": a.folders.spam, "archive": a.folders.archive},
         "save_sent": a.save_sent,
@@ -1113,6 +1122,39 @@ mod tests {
         s.execute("account.remove", &json!({"id": "mario-sirius-example-it"})).unwrap();
         assert_eq!(s.config().accounts.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn html_signature_and_recipient_completion() {
+        let mock = MockBackend::demo();
+        let mut s = session(&mock);
+        s.run_blocking("mail.sync", json!({})).unwrap();
+        // People seen in the inbox complete recipients; the person's own address never does.
+        let v = s.execute("contacts.search", &json!({"query": "luc"})).unwrap();
+        assert_eq!(v["contacts"][0]["email"], "luca@example.com", "{v}");
+        assert!(v["contacts"][0]["display"].as_str().unwrap().contains("Luca Bianchi"));
+        assert!(s.execute("contacts.search", &json!({"query": "riccardo@example"})).unwrap()["contacts"].as_array().unwrap().is_empty());
+        // An HTML signature with a logo: the message goes out as text + HTML with an inline image.
+        let logo = mailcraft_core::mime::base64_encode(b"\x89PNG\x00");
+        s.execute("account.update", &json!({"signature": "", "signature_html": format!("<b>Riccardo Burrai</b><br><a href=\"https://sirius.example\">Sirius</a><br><img src=\"data:image/png;base64,{logo}\">")})).unwrap();
+        s.run_blocking("mail.send", json!({"to": "nuovo@cliente.it", "subject": "Offerta", "body": "Ciao,\nin allegato l'offerta."})).unwrap();
+        let raw = mock.sent().last().unwrap().2.clone();
+        let m = mailcraft_core::mime::parse(&raw).unwrap();
+        assert!(m.text.contains("in allegato l'offerta.") && m.text.contains("-- \nRiccardo Burrai"), "{}", m.text);
+        assert!(m.html.contains("<b>Riccardo Burrai</b>") && m.html.contains("cid:image1@mailcraft"), "{}", m.html);
+        assert!(m.attachments.iter().all(|a| a.inline), "the logo is not listed as a file");
+        // Someone written to comes first from now on, even with a short prefix.
+        let v = s.execute("contacts.search", &json!({"query": "nu"})).unwrap();
+        assert_eq!(v["contacts"][0]["email"], "nuovo@cliente.it", "{v}");
+        // A reply keeps the HTML signature too.
+        let uid = s.current().unwrap().list("INBOX")[0].uid;
+        s.run_blocking("mail.reply", json!({"uid": uid, "body": "Grazie!"})).unwrap();
+        let m = mailcraft_core::mime::parse(&mock.sent().last().unwrap().2).unwrap();
+        assert!(
+            m.html.contains("Grazie!") && m.html.contains("<b>Riccardo Burrai</b>") && m.html.contains("ha scritto") || m.html.contains("wrote"),
+            "{}",
+            m.html
+        );
     }
 
     #[test]

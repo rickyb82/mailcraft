@@ -42,7 +42,7 @@ pub const COMMANDS: &[Command] = &[
         "Add Account",
         "Settings › Accounts › Add",
         "",
-        "{email, password?, name?, display_name?, username?, imap_host?, imap_port?, imap_security?: tls|starttls|none, smtp_host?, smtp_port?, smtp_security?, signature?, color?, trust_invalid_certs?, save_sent?} (missing servers come from the provider suggestion)",
+        "{email, password?, name?, display_name?, username?, imap_host?, imap_port?, imap_security?: tls|starttls|none, smtp_host?, smtp_port?, smtp_security?, signature?, signature_html?, color?, trust_invalid_certs?, save_sent?, auth?} (missing servers come from the provider suggestion)",
         false,
     ),
     c(
@@ -161,7 +161,7 @@ pub const COMMANDS: &[Command] = &[
         "Send",
         "Compose › Send",
         "Cmd+Enter",
-        "{account?, to, cc?, bcc?, subject, body, in_reply_to?, references?, attachments?: [{name, mime, data (base64)} | {path}], reply_to_uid?, reply_mailbox?, draft_uid?, signature?: bool}",
+        "{account?, to, cc?, bcc?, subject, body, html?, in_reply_to?, references?, attachments?: [{name, mime, data (base64)} | {path}], reply_to_uid?, reply_mailbox?, draft_uid?, signature?: bool}",
         true,
     ),
     c("mail.reply", "Reply", "Mail › Reply", "R", "{uid, body, all?: bool, mailbox?, quote?: bool, account?}", true),
@@ -185,6 +185,14 @@ pub const COMMANDS: &[Command] = &[
         true,
     ),
     c("mail.close", "Close Message", "Mail › Close", "Escape", "{} → closes the open message", false),
+    c(
+        "contacts.search",
+        "Contacts",
+        "Mail › Contacts",
+        "",
+        "{query?, limit? (8), account?} → people seen in mail or written to, best match first",
+        false,
+    ),
     c("selection.set", "Select", "Edit › Select", "", "{uids: [...]}", false),
     c("selection.all", "Select All", "Edit › Select All", "Cmd+A", "{}", false),
     c("selection.clear", "Clear Selection", "Edit › Clear Selection", "Escape", "{}", false),
@@ -372,6 +380,9 @@ impl Session {
         if let Some(v) = p::opt_str(prm, "signature") {
             a.signature = v.to_string();
         }
+        if let Some(v) = p::opt_str(prm, "signature_html") {
+            a.signature_html = mailcraft_core::clip(v, 200_000).to_string();
+        }
         if let Some(v) = p::opt_str(prm, "color") {
             a.color = v.to_string();
         }
@@ -431,9 +442,16 @@ impl Session {
     /// Builds the raw message of a draft (signature added) and the SMTP envelope.
     fn build_outgoing(&self, account: &Account, draft: &Draft, with_signature: bool) -> Result<(Vec<u8>, Vec<String>)> {
         let mut d = draft.clone();
-        if with_signature && !account.signature.trim().is_empty() && !d.body.contains(account.signature.trim()) {
-            d.body = format!("{}\n\n-- \n{}", d.body.trim_end(), account.signature.trim());
+        let note = draft.body.clone();
+        let text_sig = account.signature_text();
+        if with_signature && !text_sig.is_empty() && !d.body.contains(&text_sig) {
+            d.body = format!("{}\n\n-- \n{text_sig}", d.body.trim_end());
         }
+        // An HTML signature makes the message HTML (with a text alternative): logo, bold, links.
+        if with_signature && !account.signature_html.trim().is_empty() && d.html.trim().is_empty() {
+            d.html = format!("{}<br><br>-- <br>{}", mime::text_to_html(note.trim_end()), account.signature_html.trim());
+        }
+        mime::inline_data_images(&mut d);
         let from = Address::new(account.from_name(), &account.email);
         let domain = account.email.split('@').nth(1).unwrap_or("mailcraft");
         let id = format!("<{}.{}@{}>", time::now(), self.next_job, domain);
@@ -448,6 +466,7 @@ impl Session {
             bcc: p::addresses(prm, "bcc"),
             subject: p::opt_str(prm, "subject").unwrap_or_default().to_string(),
             body: prm.get("body").and_then(Value::as_str).unwrap_or_default().to_string(),
+            html: prm.get("html").and_then(Value::as_str).unwrap_or_default().to_string(),
             in_reply_to: p::opt_str(prm, "in_reply_to").unwrap_or_default().to_string(),
             references: prm
                 .get("references")
@@ -463,7 +482,7 @@ impl Session {
                     let data = std::fs::read(path).map_err(|e| Error::Param(format!("attachment `{path}`: {e}")))?;
                     let name =
                         std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "attachment".into());
-                    d.attachments.push(DraftAttachment { name, mime: guess_mime(path).to_string(), data });
+                    d.attachments.push(DraftAttachment { name, mime: guess_mime(path).to_string(), data, cid: String::new() });
                 } else {
                     let data = a
                         .get("data")
@@ -474,6 +493,7 @@ impl Session {
                         name: a.get("name").and_then(Value::as_str).unwrap_or("attachment").to_string(),
                         mime: a.get("mime").and_then(Value::as_str).unwrap_or("application/octet-stream").to_string(),
                         data,
+                        cid: String::new(),
                     });
                 }
             }
@@ -1045,7 +1065,8 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
                 all: p::opt_bool(prm, "all").unwrap_or(false),
                 forward_to,
                 from: Address::new(account.from_name(), &account.email),
-                signature: account.signature.clone(),
+                signature: account.signature_text(),
+                signature_html: account.signature_html.clone(),
                 italian,
                 copy_to,
                 quote: p::opt_bool(prm, "quote").unwrap_or(true),
@@ -1093,6 +1114,41 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             let subscribed = p::opt_bool(prm, "subscribed").unwrap_or(true);
             let job = s.submit(id, &acc, JobKind::Subscribe { path, subscribed })?;
             Ok(json!({"job": job}))
+        }
+        "contacts.search" => {
+            let query = p::opt_str(prm, "query").unwrap_or_default().trim().to_string();
+            let limit = p::opt_u32(prm, "limit").unwrap_or(8).clamp(1, 200) as usize;
+            let only: Option<String> = p::opt_str(prm, "account")
+                .filter(|a| !a.is_empty() && *a != ALL)
+                .map(|a| s.config.find(a).map(|x| x.id.clone()).unwrap_or(a.to_string()));
+            let own: Vec<String> = s.config.accounts.iter().map(|a| a.email.to_ascii_lowercase()).collect();
+            let mut hits: Vec<crate::store::Contact> = Vec::new();
+            for (id, st) in &s.store {
+                if only.as_ref().is_some_and(|o| o != id) {
+                    continue;
+                }
+                for c in st.contacts.values().filter(|c| c.matches(&query) && !own.contains(&c.email)) {
+                    match hits.iter_mut().find(|h| h.email == c.email) {
+                        Some(h) => {
+                            h.count = h.count.saturating_add(c.count);
+                            h.last = h.last.max(c.last);
+                            if h.name.is_empty() {
+                                h.name = c.name.clone();
+                            }
+                        }
+                        None => hits.push(c.clone()),
+                    }
+                }
+            }
+            let q = query.to_ascii_lowercase();
+            hits.sort_by(|a, b| {
+                let exact = |c: &crate::store::Contact| c.email.starts_with(&q) || c.name.to_ascii_lowercase().starts_with(&q);
+                exact(b).cmp(&exact(a)).then(b.count.cmp(&a.count)).then(b.last.cmp(&a.last)).then(a.email.cmp(&b.email))
+            });
+            hits.truncate(limit);
+            Ok(
+                json!({"query": query, "contacts": hits.iter().map(|c| json!({"name": c.name, "email": c.email, "count": c.count, "display": Address::new(&c.name, &c.email).display()})).collect::<Vec<_>>()}),
+            )
         }
         "mail.close" => {
             s.view.open = None;

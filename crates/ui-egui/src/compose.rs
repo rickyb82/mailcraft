@@ -2,10 +2,60 @@
 
 use egui::{Align, FontId, Layout, RichText, Sense, Stroke, StrokeKind, vec2};
 
+use serde_json::json;
+
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 use crate::widgets::{icon_button, primary_button};
 use crate::{MailApp, Request};
+
+/// A recipients field with completion: while a name or address is typed after the last comma,
+/// the people seen in mail are offered below it (click, or Enter for the first).
+fn address_field(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, label: &str, value: &mut String, hint: &str, extra: impl FnOnce(&mut egui::Ui)) {
+    let resp = ui
+        .horizontal(|ui| {
+            ui.add_sized(vec2(44.0, 24.0), egui::Label::new(RichText::new(label).color(t.muted)));
+            let w = ui.available_width() - 80.0;
+            let r = ui.add(egui::TextEdit::singleline(value).hint_text(hint).desired_width(w).frame(egui::Frame::NONE));
+            extra(ui);
+            r
+        })
+        .inner;
+    ui.painter().hline(ui.min_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.border));
+    let token = value.rsplit(',').next().unwrap_or_default().trim().to_string();
+    if resp.has_focus() && token.chars().count() >= 2 && app.contact_query != token {
+        app.contact_query = token.clone();
+        app.contact_hits.clear();
+        app.run("contacts.search", json!({"query": token, "limit": 6}));
+    }
+    if token.is_empty() || app.contact_query != token || app.contact_hits.is_empty() {
+        return;
+    }
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.contact_hits.clear();
+        return;
+    }
+    let lower = value.to_ascii_lowercase();
+    let hits: Vec<(String, String)> = app.contact_hits.iter().filter(|(_, email)| !lower.contains(&email.to_ascii_lowercase())).cloned().collect();
+    let mut chosen: Option<String> = None;
+    if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        chosen = hits.first().map(|h| h.0.clone());
+    }
+    egui::Frame::NONE.fill(t.panel).stroke(Stroke::new(1.0, t.border)).corner_radius(8).inner_margin(4).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        for (display, _) in &hits {
+            if ui.selectable_label(false, display).clicked() {
+                chosen = Some(display.clone());
+            }
+        }
+    });
+    if let Some(display) = chosen {
+        MailApp::complete_recipient(value, &display);
+        app.contact_hits.clear();
+        app.contact_query.clear();
+        resp.request_focus();
+    }
+}
 
 pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
     let Some(mut c) = app.compose.clone() else { return };
@@ -98,18 +148,18 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                             });
                             ui.painter().hline(ui.min_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.border));
                         };
-                        ui.horizontal(|ui| {
-                            ui.add_sized(vec2(44.0, 24.0), egui::Label::new(RichText::new(app.tr("To")).color(t.muted)));
-                            let w = ui.available_width() - 80.0;
-                            ui.add(egui::TextEdit::singleline(&mut c.to).hint_text(app.tr("Recipients")).desired_width(w).frame(egui::Frame::NONE));
-                            if !c.show_cc && ui.small_button("Cc/Bcc").clicked() {
-                                c.show_cc = true;
+                        let (to_l, cc_l, bcc_l, hint) =
+                            (app.tr("To").to_string(), app.tr("Cc").to_string(), app.tr("Bcc").to_string(), app.tr("Recipients").to_string());
+                        let mut show_cc = c.show_cc;
+                        address_field(app, ui, t, &to_l, &mut c.to, &hint, |ui| {
+                            if !show_cc && ui.small_button("Cc/Bcc").clicked() {
+                                show_cc = true;
                             }
                         });
-                        ui.painter().hline(ui.min_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.border));
+                        c.show_cc = show_cc;
                         if c.show_cc {
-                            field(ui, app.tr("Cc"), &mut c.cc, "");
-                            field(ui, app.tr("Bcc"), &mut c.bcc, "");
+                            address_field(app, ui, t, &cc_l, &mut c.cc, "", |_| {});
+                            address_field(app, ui, t, &bcc_l, &mut c.bcc, "", |_| {});
                         }
                         field(ui, "", &mut c.subject, app.tr("Subject"));
                         ui.add_space(4.0);

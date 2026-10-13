@@ -125,6 +125,9 @@ pub struct Account {
     /// (`google`, `microsoft`) whose tokens live in [`Secrets`].
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub auth: String,
+    /// The signature as HTML (logo, bold, links); `signature` is its plain-text version.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature_html: String,
 }
 
 const fn yes() -> bool {
@@ -147,6 +150,7 @@ impl Default for Account {
             save_sent: true,
             trust_invalid_certs: false,
             auth: String::new(),
+            signature_html: String::new(),
         }
     }
 }
@@ -155,6 +159,14 @@ impl Account {
     /// The login name: the explicit user name or the address.
     pub fn login(&self) -> &str {
         if self.username.trim().is_empty() { &self.email } else { &self.username }
+    }
+
+    /// The plain-text signature: the one typed, or the HTML one reduced to text.
+    pub fn signature_text(&self) -> String {
+        if !self.signature.trim().is_empty() {
+            return self.signature.trim().to_string();
+        }
+        crate::mime::html_to_text(&self.signature_html).trim().to_string()
     }
 
     /// The OAuth provider the account signs in with, if it does not use a password.

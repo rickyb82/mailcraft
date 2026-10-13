@@ -58,7 +58,8 @@ See [`oauth.md`](oauth.md).
 | `search` | `from:` `to:` `subject:` `is:unread` `is:starred` `has:attachment` `newer_than:7d` plus words; `account: "*"` searches every account |
 | `read_message` | Headers, text body (HTML reduced to text), attachment list; marks read unless `mark_read=false` |
 | `save_attachment` | Save an attachment to a path |
-| `send_mail`, `reply`, `forward` | Send (signature added), reply with quote (`all`), forward with attachments |
+| `send_mail`, `reply`, `forward` | Send (signature added, HTML signature as a text+HTML message; optional `html` body), reply with quote (`all`), forward with attachments |
+| `search_contacts` | People seen in mail or written to, best match first (resolve a name into an address) |
 | `mark`, `archive`, `trash`, `spam`, `move` | Flags and moves by uid |
 | `save_draft`, `create_folder`, `subscribe_folder` | Drafts and folders (hide a folder from the navigation with `subscribed: false`) |
 | `list_commands`, `run_command` | Every engine command |

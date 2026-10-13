@@ -31,6 +31,7 @@ pub struct AccountForm {
     pub smtp_port: String,
     pub smtp_security: Security,
     pub signature: String,
+    pub signature_html: String,
     pub trust_invalid_certs: bool,
     pub save_sent: bool,
     pub notes: Vec<String>,
@@ -64,6 +65,7 @@ impl AccountForm {
             smtp_port: a.smtp.port.to_string(),
             smtp_security: a.smtp.security,
             signature: a.signature.clone(),
+            signature_html: a.signature_html.clone(),
             trust_invalid_certs: a.trust_invalid_certs,
             save_sent: a.save_sent,
             notes: Vec::new(),
@@ -113,6 +115,7 @@ impl AccountForm {
             "smtp_port": self.smtp_port.trim().parse::<u32>().unwrap_or(0),
             "smtp_security": self.smtp_security.name(),
             "signature": self.signature,
+            "signature_html": self.signature_html,
             "trust_invalid_certs": self.trust_invalid_certs,
             "save_sent": self.save_sent,
             "folders": {"sent": self.sent, "drafts": self.drafts, "trash": self.trash, "spam": self.spam, "archive": self.archive},
@@ -363,6 +366,12 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.end_row();
             ui.label(RichText::new(app.tr("Signature")).color(t.muted));
             ui.add(egui::TextEdit::multiline(&mut f.signature).desired_rows(3).desired_width(360.0));
+            ui.end_row();
+            ui.label(RichText::new(app.tr("Signature (HTML)")).color(t.muted));
+            ui.vertical(|ui| {
+                ui.add(egui::TextEdit::multiline(&mut f.signature_html).desired_rows(4).desired_width(360.0).font(egui::FontId::monospace(12.0)));
+                ui.label(RichText::new(app.tr("Paste the HTML of your signature: logo (<img src=\"https://…\"> or a data: image), bold, links. Messages then go out as text + HTML; the plain signature above is the text version (derived from the HTML when empty).")).small().color(t.muted));
+            });
             ui.end_row();
         });
         if let Some(p) = needs_client {

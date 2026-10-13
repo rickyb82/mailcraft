@@ -194,6 +194,8 @@ pub const LABELS: &[&str] = &[
     "Port",
     "Security",
     "Signature",
+    "Signature (HTML)",
+    "Paste the HTML of your signature: logo (<img src=\"https://…\"> or a data: image), bold, links. Messages then go out as text + HTML; the plain signature above is the text version (derived from the HTML when empty).",
     "Accept invalid certificates (local bridges, self-hosted servers)",
     "Copy sent mail to the Sent folder",
     "Suggest from the provider",

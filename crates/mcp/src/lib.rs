@@ -60,7 +60,8 @@ fn tools() -> Value {
         "username": {"type": "string", "description": "Login when it is not the address"},
         "imap_host": {"type": "string"}, "imap_port": port, "imap_security": security,
         "smtp_host": {"type": "string"}, "smtp_port": port, "smtp_security": security,
-        "signature": {"type": "string"},
+        "signature": {"type": "string", "description": "Plain-text signature"},
+        "signature_html": {"type": "string", "description": "HTML signature (logo, bold, links); the text one is derived when empty"},
         "color": {"type": "string", "description": "#rrggbb"},
         "trust_invalid_certs": {"type": "boolean", "description": "Accept a server certificate that does not validate (local bridges, self-hosted servers)"},
         "save_sent": {"type": "boolean", "description": "Copy sent mail to the Sent folder (off for Gmail, which does it itself)"},
@@ -126,8 +127,10 @@ fn tools() -> Value {
         {"name": "save_attachment", "description": "Save an attachment of an open message to a path (a directory keeps the file's name).",
          "inputSchema": {"type": "object", "properties": {"uid": uid, "index": {"type": "integer", "minimum": 0}, "path": {"type": "string"}, "account": account, "mailbox": mailbox}, "required": ["uid", "index", "path"]}},
         {"name": "send_mail", "description": "Send a new message (the account's signature is added). Show the person the text first and send only when they agree.",
-         "inputSchema": {"type": "object", "properties": {"to": addresses, "cc": addresses, "bcc": addresses, "subject": {"type": "string"}, "body": {"type": "string"}, "account": account,
+         "inputSchema": {"type": "object", "properties": {"to": addresses, "cc": addresses, "bcc": addresses, "subject": {"type": "string"}, "body": {"type": "string"}, "html": {"type": "string", "description": "Optional HTML version of the body"}, "account": account,
             "attachments": {"type": "array", "items": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}}}, "required": ["to", "subject", "body"]}},
+        {"name": "search_contacts", "description": "People seen in mail or written to, best match first: use it to resolve a name into an address before sending.",
+         "inputSchema": {"type": "object", "properties": {"query": {"type": "string", "description": "A name or address prefix (empty = the most used)"}, "limit": {"type": "integer", "minimum": 1}, "account": account}}},
         {"name": "reply", "description": "Reply to a message (quoting it) with the given text; all=true answers everyone.",
          "inputSchema": {"type": "object", "properties": {"uid": uid, "body": {"type": "string"}, "all": {"type": "boolean"}, "quote": {"type": "boolean"}, "account": account, "mailbox": mailbox}, "required": ["uid", "body"]}},
         {"name": "forward", "description": "Forward a message (attachments included) to recipients, with an optional note.",
@@ -366,6 +369,7 @@ impl Server {
                     "smtp_port",
                     "smtp_security",
                     "signature",
+                    "signature_html",
                     "color",
                     "trust_invalid_certs",
                     "save_sent",
@@ -453,6 +457,7 @@ impl Server {
                     "smtp_port",
                     "smtp_security",
                     "signature",
+                    "signature_html",
                     "color",
                     "trust_invalid_certs",
                     "save_sent",
@@ -553,7 +558,15 @@ impl Server {
                 Ok(out)
             }
             "save_attachment" => self.run("mail.attachment", self.pass_through(args, &["uid", "index", "path", "account", "mailbox"])),
-            "send_mail" => self.run("mail.send", self.pass_through(args, &["to", "cc", "bcc", "subject", "body", "account", "attachments"])),
+            "send_mail" => self.run("mail.send", self.pass_through(args, &["to", "cc", "bcc", "subject", "body", "html", "account", "attachments"])),
+            "search_contacts" => {
+                let v = self.run("contacts.search", self.pass_through(args, &["query", "limit", "account"]))?;
+                let lines: Vec<String> = v["contacts"]
+                    .as_array()
+                    .map(|l| l.iter().filter_map(|c| c["display"].as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                Ok(json!({"text": if lines.is_empty() { "No contact matches.".to_string() } else { lines.join("\n") }, "contacts": v["contacts"]}))
+            }
             "reply" => self.run("mail.reply", self.pass_through(args, &["uid", "body", "all", "quote", "account", "mailbox", "language"])),
             "forward" => self.run("mail.forward", self.pass_through(args, &["uid", "to", "body", "account", "mailbox", "language"])),
             "mark" => {

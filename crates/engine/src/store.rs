@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use mailcraft_core::account::slug;
 use mailcraft_core::backend::FlagChange;
 use mailcraft_core::mailbox::{Mailbox, Role};
-use mailcraft_core::message::{Envelope, Message};
+use mailcraft_core::message::{Address, Envelope, Message};
 use mailcraft_core::{Result, limits};
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,9 @@ use serde::{Deserialize, Serialize};
 pub struct AccountState {
     pub mailboxes: Vec<Mailbox>,
     pub delimiter: String,
+    /// Everyone seen in headers and written to, by lower-case address: the address book that
+    /// completes recipients.
+    pub contacts: BTreeMap<String, Contact>,
     /// Envelopes per mailbox path, newest first.
     pub envelopes: BTreeMap<String, Vec<Envelope>>,
     /// Unix time of the last successful mailbox list.
@@ -50,7 +53,40 @@ impl AccountState {
     }
 
     /// Merges a fetched page: replaces the window, keeps the rest, sorts newest first.
+    /// Remembers the people in these envelopes (sender, recipients) for recipient completion.
+    pub fn note_envelopes(&mut self, list: &[Envelope]) {
+        for e in list {
+            let when = e.date;
+            self.note_addresses(e.from.iter().chain(&e.to).chain(&e.cc), when, 1);
+        }
+    }
+
+    /// Remembers addresses written to or seen; `weight` ranks what the person wrote to higher.
+    pub fn note_addresses<'a>(&mut self, addrs: impl Iterator<Item = &'a Address>, when: i64, weight: u32) {
+        for a in addrs {
+            let key = a.email.trim().to_ascii_lowercase();
+            if !mailcraft_core::account::is_email(&key) || key.contains("noreply") || key.contains("no-reply") {
+                continue;
+            }
+            let c = self.contacts.entry(key.clone()).or_insert_with(|| Contact { email: key.clone(), ..Contact::default() });
+            if c.name.is_empty() && !a.name.trim().is_empty() {
+                c.name = a.name.trim().to_string();
+            }
+            c.count = c.count.saturating_add(weight);
+            c.last = c.last.max(when);
+        }
+        if self.contacts.len() > MAX_CONTACTS {
+            let mut by_use: Vec<(u32, i64, String)> = self.contacts.values().map(|c| (c.count, c.last, c.email.clone())).collect();
+            by_use.sort();
+            for (_, _, email) in by_use.into_iter().take(self.contacts.len() - MAX_CONTACTS) {
+                self.contacts.remove(&email);
+            }
+        }
+        self.dirty = true;
+    }
+
     pub fn merge_page(&mut self, path: &str, offset: usize, limit: usize, page: Vec<Envelope>) {
+        self.note_envelopes(&page);
         let list = self.envelopes.entry(path.to_string()).or_default();
         let uids: Vec<u32> = page.iter().map(|e| e.uid).collect();
         list.retain(|e| !uids.contains(&e.uid));
@@ -73,6 +109,7 @@ impl AccountState {
     }
 
     pub fn update_envelopes(&mut self, path: &str, fresh: Vec<Envelope>) {
+        self.note_envelopes(&fresh);
         let list = self.envelopes.entry(path.to_string()).or_default();
         for f in fresh {
             match list.iter_mut().find(|e| e.uid == f.uid) {
@@ -177,7 +214,8 @@ impl AccountState {
 
     pub fn save(&mut self, dir: &Path) -> Result<()> {
         std::fs::create_dir_all(dir).map_err(|e| mailcraft_core::Error::Io(format!("{}: {e}", dir.display())))?;
-        let meta = serde_json::json!({"mailboxes": self.mailboxes, "delimiter": self.delimiter, "last_sync": self.last_sync});
+        let meta =
+            serde_json::json!({"mailboxes": self.mailboxes, "delimiter": self.delimiter, "last_sync": self.last_sync, "contacts": self.contacts});
         std::fs::write(dir.join("mailboxes.json"), meta.to_string()).map_err(|e| mailcraft_core::Error::Io(e.to_string()))?;
         for (path, list) in &self.envelopes {
             let keep: Vec<&Envelope> = list.iter().take(limits::MAX_PAGE * 4).collect();
@@ -196,6 +234,10 @@ impl AccountState {
             state.mailboxes = serde_json::from_value(v.get("mailboxes").cloned().unwrap_or_default()).unwrap_or_default();
             state.delimiter = v.get("delimiter").and_then(|d| d.as_str()).unwrap_or("/").to_string();
             state.last_sync = v.get("last_sync").and_then(serde_json::Value::as_i64).unwrap_or(0);
+            state.contacts = serde_json::from_value(v.get("contacts").cloned().unwrap_or_default()).unwrap_or_default();
+            if state.contacts.len() > MAX_CONTACTS {
+                state.contacts = BTreeMap::new();
+            }
         }
         let paths: Vec<String> = state.mailboxes.iter().map(|m| m.path.clone()).collect();
         for path in paths {
@@ -208,6 +250,36 @@ impl AccountState {
             }
         }
         state
+    }
+}
+
+/// Contacts kept per account.
+pub const MAX_CONTACTS: usize = 5_000;
+
+/// Someone seen in a message or written to.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Contact {
+    pub name: String,
+    pub email: String,
+    /// How often seen; writing to someone counts more than seeing them.
+    pub count: u32,
+    /// Unix time of the latest message with them.
+    pub last: i64,
+}
+
+impl Contact {
+    /// Matches a typed prefix against the address, the name, or any word of the name.
+    pub fn matches(&self, query: &str) -> bool {
+        let q = query.trim().to_ascii_lowercase();
+        if q.is_empty() {
+            return true;
+        }
+        let name = self.name.to_ascii_lowercase();
+        self.email.starts_with(&q)
+            || self.email.contains(&format!("@{q}"))
+            || name.starts_with(&q)
+            || name.split([' ', '.', '-']).any(|w| w.starts_with(&q))
     }
 }
 

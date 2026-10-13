@@ -73,6 +73,7 @@ pub enum JobKind {
         forward_to: Vec<Address>,
         from: Address,
         signature: String,
+        signature_html: String,
         italian: bool,
         copy_to: Option<String>,
         quote: bool,
@@ -367,10 +368,11 @@ fn execute(factory: &BackendFactory, broker: &dyn OAuthBroker, slots: &mut HashM
             }
             Ok(Output::Sent { message_id, copied_to: copied, copy_error })
         }
-        JobKind::Respond { mailbox, uid, body, all, forward_to, from, signature, italian, copy_to, quote } => {
+        JobKind::Respond { mailbox, uid, body, all, forward_to, from, signature, signature_html, italian, copy_to, quote } => {
             let raw = b.fetch(mailbox, *uid)?;
             let original = mime::parse(&raw)?;
-            let draft = compose_response(&original, &raw, body, *all, forward_to, from, signature, *italian, *quote);
+            let mut draft = compose_response(&original, &raw, body, *all, forward_to, from, signature, signature_html, *italian, *quote);
+            mime::inline_data_images(&mut draft);
             let message_id = format!("<{}.{}@{}>", time::now(), uid, from.email.split('@').nth(1).unwrap_or("mailcraft"));
             let out = mime::build(&draft, from, time::now(), &message_id)?;
             b.send(&from.email, &draft.recipients(), &out)?;
@@ -420,6 +422,7 @@ pub fn compose_response(
     forward_to: &[Address],
     from: &Address,
     signature: &str,
+    signature_html: &str,
     italian: bool,
     quote: bool,
 ) -> Draft {
@@ -427,6 +430,13 @@ pub fn compose_response(
     let me = from.email.to_ascii_lowercase();
     let mut draft = Draft::default();
     let sig = if signature.trim().is_empty() { String::new() } else { format!("\n\n-- \n{}", signature.trim()) };
+    // The HTML version: the note, the HTML signature, then the quote or the forwarded text.
+    let html_of = |body: &str, tail: &str| -> String {
+        if signature_html.trim().is_empty() {
+            return String::new();
+        }
+        format!("{}<br><br>-- <br>{}{}", mime::text_to_html(body.trim_end()), signature_html.trim(), mime::text_to_html(tail))
+    };
     if forward_to.is_empty() {
         let reply_to = if original.reply_to.is_empty() { e.from.clone() } else { original.reply_to.clone() };
         draft.to = reply_to.into_iter().filter(|a| a.email.to_ascii_lowercase() != me).collect();
@@ -454,7 +464,9 @@ pub fn compose_response(
         }
         draft.in_reply_to = e.message_id.clone();
         draft.references = e.references.iter().cloned().chain(std::iter::once(e.message_id.clone())).filter(|r| !r.is_empty()).collect();
-        draft.body = format!("{}{}{}", body.trim_end(), sig, if quote { mime::quote(original, italian) } else { String::new() });
+        let tail = if quote { mime::quote(original, italian) } else { String::new() };
+        draft.html = html_of(body, &tail);
+        draft.body = format!("{}{}{}", body.trim_end(), sig, tail);
     } else {
         draft.to = forward_to.to_vec();
         let subject = e.subject.trim();
@@ -465,16 +477,16 @@ pub fn compose_response(
         };
         let header = if italian { "---------- Messaggio inoltrato ----------" } else { "---------- Forwarded message ----------" };
         let (from_l, date_l, subject_l, to_l) = if italian { ("Da", "Data", "Oggetto", "A") } else { ("From", "Date", "Subject", "To") };
-        draft.body = format!(
-            "{}{}\n\n{header}\n{from_l}: {}\n{date_l}: {}\n{subject_l}: {}\n{to_l}: {}\n\n{}",
-            body.trim_end(),
-            sig,
+        let tail = format!(
+            "\n\n{header}\n{from_l}: {}\n{date_l}: {}\n{subject_l}: {}\n{to_l}: {}\n\n{}",
             mailcraft_core::message::join_addresses(&e.from),
             time::long(e.date, italian),
             e.subject,
             mailcraft_core::message::join_addresses(&e.to),
             original.body_text()
         );
+        draft.html = html_of(body, &tail);
+        draft.body = format!("{}{}{}", body.trim_end(), sig, tail);
         draft.attachments = mime::attachments(raw);
         draft.references = e.references.iter().cloned().chain(std::iter::once(e.message_id.clone())).filter(|r| !r.is_empty()).collect();
     }

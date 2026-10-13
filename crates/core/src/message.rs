@@ -231,6 +231,9 @@ pub struct DraftAttachment {
     pub mime: String,
     #[serde(with = "base64_bytes")]
     pub data: Vec<u8>,
+    /// Set for an image the HTML body shows inline (`<img src="cid:…">`), not a file to list.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub cid: String,
 }
 
 /// A message being written.
@@ -243,6 +246,8 @@ pub struct Draft {
     pub bcc: Vec<Address>,
     pub subject: String,
     pub body: String,
+    /// The HTML version of the body (sent as multipart/alternative when set).
+    pub html: String,
     pub in_reply_to: String,
     pub references: Vec<String>,
     pub attachments: Vec<DraftAttachment>,

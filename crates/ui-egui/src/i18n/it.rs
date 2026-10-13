@@ -151,6 +151,10 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Port" => "Porta",
         "Security" => "Sicurezza",
         "Signature" => "Firma",
+        "Signature (HTML)" => "Firma (HTML)",
+        "Paste the HTML of your signature: logo (<img src=\"https://…\"> or a data: image), bold, links. Messages then go out as text + HTML; the plain signature above is the text version (derived from the HTML when empty)." => {
+            "Incolla l'HTML della firma: logo (<img src=\"https://…\"> o un'immagine data:), grassetto, link. I messaggi partono poi come testo + HTML; la firma semplice qui sopra è la versione testuale (ricavata dall'HTML se vuota)."
+        }
         "Accept invalid certificates (local bridges, self-hosted servers)" => "Accetta certificati non validi (bridge locali, server propri)",
         "Copy sent mail to the Sent folder" => "Copia la posta inviata nella cartella Inviati",
         "Suggest from the provider" => "Suggerisci dal provider",

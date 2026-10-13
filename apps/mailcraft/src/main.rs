@@ -26,6 +26,7 @@ impl App {
                                     name,
                                     mime: "application/octet-stream".into(),
                                     data,
+                                    cid: String::new(),
                                 });
                             }
                         }

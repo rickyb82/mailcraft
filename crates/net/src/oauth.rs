@@ -47,10 +47,27 @@ mod tests {
         let port = listener.local_addr().expect("addr").port();
         std::thread::spawn(move || {
             let Ok((mut s, _)) = listener.accept() else { return };
-            let mut buf = vec![0u8; 8192];
-            let n = s.read(&mut buf).unwrap_or(0);
-            let req = String::from_utf8_lossy(&buf[..n]).to_string();
-            let (head, body) = req.split_once("\r\n\r\n").unwrap_or((&req, ""));
+            // Headers, then the body up to Content-Length (they may arrive in separate reads).
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            let (head, body) = loop {
+                let n = s.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break (String::from_utf8_lossy(&raw).to_string(), String::new());
+                }
+                raw.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&raw).to_string();
+                if let Some((head, body)) = text.split_once("\r\n\r\n") {
+                    let want: usize = head
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if body.len() >= want {
+                        break (head.to_string(), body.to_string());
+                    }
+                }
+            };
+            let (head, body) = (head.as_str(), body.as_str());
             let types: Vec<&str> = head.lines().filter(|l| l.to_ascii_lowercase().starts_with("content-type:")).collect();
             let ok = types.len() == 1 && types[0].to_ascii_lowercase().contains("application/x-www-form-urlencoded") && body.contains("grant_type=");
             let (status, out) = if ok {

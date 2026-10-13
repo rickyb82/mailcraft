@@ -129,7 +129,7 @@ mod web {
                 && let Some(c) = &mut self.app.compose
             {
                 for (name, data) in files {
-                    c.attachments.push(DraftAttachment { mime: mime_for(&name).into(), name, data });
+                    c.attachments.push(DraftAttachment { mime: mime_for(&name).into(), name, data, cid: String::new() });
                 }
             }
             self.app.ui(ui);

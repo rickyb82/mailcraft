@@ -38,6 +38,10 @@ triage and answer your mail. Part of the *craft* family (`gridcraft`, `ideacraft
   (`MAILCRAFT_BUILTIN_GOOGLE_CLIENT_ID` at build time), so users just press *Sign in with
   Google*; otherwise the client is pasted in Settings, `mailcraft-cli oauth`, or environment
   variables. App passwords still work. See [`docs/oauth.md`](docs/oauth.md).
+- **Signatures with a logo, recipients that complete themselves** — paste the HTML of your
+  signature (logo, bold, links): messages go out as text + HTML with the logo inline, replies
+  and forwards included. While you type a recipient, the people seen in your mail or written
+  to are offered (click or Enter), newest and most written-to first.
 - **Your folders, your way** — the account form lists the server's folders: untick one to hide
   it from the navigation (IMAP subscription), pick the Sent, Drafts, Trash, Spam and Archive
   folders when the server names them unusually, create folders. Sent mail is copied to the
