@@ -58,6 +58,7 @@
 | 2026-10-13 | 0.1: model, autoconfig, IMAP/SMTP transport with in-process test servers, engine with commands and cache, Gmail-style egui UI, MCP server with configuration prompts, CLI |
 | 2026-10-13 | Web app: `MailSession` abstraction, snapshots by revision, `mailcraft-remote`, `mailcraft-cli serve` (HTTP API, static files, token), `apps/mailcraft-web` on GitHub Pages |
 | 2026-10-13 | Multi-user server for frameworks: `--users-dir`, service and per-user tokens, `/api/users`, MCP over the server (`mcp --server`), Dockerfile and compose, deploy guide |
+| 2026-10-13 | Time zones: dates shown in the device's (or the browser's) zone, preference `time_offset` (auto, UTC, +02:00) in Settings, the CLI and the MCP tools |
 | 2026-10-13 | Assistant integration for frameworks: `--assist-url` announced in the snapshot, reply-suggestion chips under the open message and "Write with the assistant" in the compose window (web app, same-origin `POST`), preferences `assist_suggestions`/`assist_cloud` |
 | 2026-10-13 | Compose formatting bar (markup → HTML: bold, italic, underline, lists, links, inline images as `cid`), print for messages and drafts (self-printing page handed to the host), draggable compose window |
 | 2026-10-13 | HTML signatures (text + HTML messages, `data:` logos as inline `cid` images, replies and forwards too), recipient completion from an address book built from headers and sent mail (`contacts.search`, MCP `search_contacts`), `html` body for `mail.send` |

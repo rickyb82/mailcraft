@@ -133,8 +133,9 @@ fn server(args: &[&str]) -> Result<Value, String> {
     Ok(v)
 }
 
-fn print_list(v: &Value, italian: bool) {
-    let now = time::now();
+fn print_list(v: &Value, italian: bool, offset: i32) {
+    let tz = offset;
+    let now = time::shifted(time::now(), tz);
     let list = v["envelopes"].as_array().cloned().unwrap_or_default();
     if list.is_empty() {
         println!("(no messages)");
@@ -150,7 +151,7 @@ fn print_list(v: &Value, italian: bool) {
         println!(
             "[{:>5}] {flags} {:>9}  {:<28} {}",
             e["uid"],
-            time::short(e["date"].as_i64().unwrap_or(0), now, italian),
+            time::short(time::shifted(e["date"].as_i64().unwrap_or(0), tz), now, italian),
             from.split(" <").next().unwrap_or(from).chars().take(28).collect::<String>(),
             e["subject"].as_str().unwrap_or("")
         );
@@ -368,7 +369,7 @@ fn run(raw: &[String]) -> Result<(), String> {
             }
             let v = s.run_blocking("mail.sync", prm).map_err(|e| e.to_string())?;
             println!("Synced {}", v["mailbox"].as_str().unwrap_or(""));
-            print_list(&v, s.italian());
+            print_list(&v, s.italian(), s.config().preferences.offset_minutes());
             Ok(())
         }
         Some("list") | Some("search") => {
@@ -393,7 +394,7 @@ fn run(raw: &[String]) -> Result<(), String> {
             {
                 list.retain(|e| e["unread"] == true);
             }
-            print_list(&v, s.italian());
+            print_list(&v, s.italian(), s.config().preferences.offset_minutes());
             Ok(())
         }
         Some("read") => {

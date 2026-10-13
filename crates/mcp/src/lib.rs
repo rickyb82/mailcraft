@@ -114,6 +114,7 @@ fn tools() -> Value {
             "sync_minutes": {"type": "integer", "minimum": 0, "maximum": 1440}, "page_size": {"type": "integer", "minimum": 5, "maximum": 500},
             "reading_pane": {"type": "boolean"}, "conversations": {"type": "boolean"}, "mark_read_on_open": {"type": "boolean"},
             "assist_suggestions": {"type": "boolean", "description": "Reply suggestions from the framework's assistant under each message"}, "assist_cloud": {"type": "boolean", "description": "Let the assistant use cloud models (default false: local only)"},
+            "time_offset": {"type": "string", "description": "Time zone dates are shown in: auto (this device's), UTC, or an offset like +02:00"},
             "undo_send_seconds": {"type": "integer", "minimum": 0, "maximum": 30}, "default_account": account}}},
         {"name": "sync", "description": "Refresh the folders and the first page of a mailbox from the server.",
          "inputSchema": {"type": "object", "properties": {"account": account, "mailbox": mailbox, "all": {"type": "boolean", "description": "Every account"}}}},
@@ -282,17 +283,17 @@ fn flag(e: &Value) -> String {
 }
 
 /// One line per message, for lists.
-fn list_text(envelopes: &[Value], italian: bool) -> String {
+fn list_text(envelopes: &[Value], italian: bool, offset_minutes: i32) -> String {
     if envelopes.is_empty() {
         return if italian { "Nessun messaggio.".into() } else { "No messages.".into() };
     }
-    let now = time::now();
+    let now = time::shifted(time::now(), offset_minutes);
     envelopes
         .iter()
         .map(|e| {
             let from = e["from"].as_array().and_then(|a| a.first()).and_then(Value::as_str).unwrap_or("");
             let from = from.split(" <").next().unwrap_or(from);
-            let date = time::short(e["date"].as_i64().unwrap_or(0), now, italian);
+            let date = time::short(time::shifted(e["date"].as_i64().unwrap_or(0), offset_minutes), now, italian);
             let snippet = e["snippet"].as_str().unwrap_or("");
             let snippet =
                 if snippet.chars().count() > 90 { format!("{}…", snippet.chars().take(90).collect::<String>()) } else { snippet.to_string() };
@@ -476,7 +477,7 @@ impl Server {
                 let v = self.run("mail.sync", self.pass_through(args, &["account", "mailbox", "all"]))?;
                 let boxes = self.run("mail.mailboxes", self.pass_through(args, &["account"]))?;
                 Ok(
-                    json!({"synced": true, "mailboxes": boxes["mailboxes"], "first_page": list_text(v["envelopes"].as_array().map(Vec::as_slice).unwrap_or_default(), italian)}),
+                    json!({"synced": true, "mailboxes": boxes["mailboxes"], "first_page": list_text(v["envelopes"].as_array().map(Vec::as_slice).unwrap_or_default(), italian, self.session.config().preferences.offset_minutes())}),
                 )
             }
             "list_mailboxes" => {
@@ -511,12 +512,16 @@ impl Server {
                 if args.get("unread_only").and_then(Value::as_bool).unwrap_or(false) {
                     list.retain(|e| e["unread"].as_bool().unwrap_or(false));
                 }
-                Ok(json!({"text": list_text(&list, italian), "mailbox": v["mailbox"], "count": list.len(), "messages": list}))
+                Ok(
+                    json!({"text": list_text(&list, italian, self.session.config().preferences.offset_minutes()), "mailbox": v["mailbox"], "count": list.len(), "messages": list}),
+                )
             }
             "search" => {
                 let v = self.run("mail.search", self.pass_through(args, &["query", "account", "mailbox", "role", "page"]))?;
                 let list: Vec<Value> = v["envelopes"].as_array().cloned().unwrap_or_default();
-                Ok(json!({"text": list_text(&list, italian), "count": list.len(), "messages": list}))
+                Ok(
+                    json!({"text": list_text(&list, italian, self.session.config().preferences.offset_minutes()), "count": list.len(), "messages": list}),
+                )
             }
             "read_message" => {
                 let v = self.run("mail.open", self.pass_through(args, &["uid", "account", "mailbox", "mark_read"]))?;
@@ -531,7 +536,7 @@ impl Server {
                         .filter(|a| !a.is_empty())
                         .map(|a| format!("Cc: {}\n", a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(", ")))
                         .unwrap_or_default(),
-                    time::long(v["date"].as_i64().unwrap_or(0), italian),
+                    time::long(time::shifted(v["date"].as_i64().unwrap_or(0), self.session.config().preferences.offset_minutes()), italian),
                     v["subject"].as_str().unwrap_or(""),
                     v["attachments"]
                         .as_array()
@@ -691,7 +696,9 @@ impl Server {
                         .current()
                         .map(|s| s.list("INBOX").iter().take(50).map(mailcraft_engine::envelope_json).collect())
                         .unwrap_or_default();
-                    Ok(json!({"contents": [{"uri": INBOX_URI, "mimeType": "text/plain", "text": list_text(&list, italian)}]}))
+                    Ok(
+                        json!({"contents": [{"uri": INBOX_URI, "mimeType": "text/plain", "text": list_text(&list, italian, self.session.config().preferences.offset_minutes())}]}),
+                    )
                 }
                 _ => Err((-32002, "resource not found".to_string())),
             },

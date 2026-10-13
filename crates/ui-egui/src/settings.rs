@@ -147,6 +147,8 @@ pub struct SettingsState {
     pub oauth_clients: HashMap<String, (String, String)>,
     /// The address whose servers were last asked for (once per address).
     pub suggested_for: String,
+    /// The time zone being typed (applied on request).
+    pub time_offset: Option<String>,
 }
 
 fn section(ui: &mut egui::Ui, t: &Tokens, text: &str) {
@@ -227,7 +229,11 @@ fn accounts_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                         )
                         .truncate(),
                     );
-                    let when = if last > 0 { mailcraft_engine::core::message::time::long(last, app.italian()) } else { app.tr("never").to_string() };
+                    let when = if last > 0 {
+                        mailcraft_engine::core::message::time::long(app.local(last), app.italian())
+                    } else {
+                        app.tr("never").to_string()
+                    };
                     match error {
                         Some(e) => ui.add(
                             egui::Label::new(
@@ -723,6 +729,28 @@ fn preferences_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
             if ui.add(egui::DragValue::new(&mut page).range(5..=500)).changed() {
                 app.run("prefs.set", json!({"page_size": page}));
             }
+            ui.end_row();
+            ui.label(RichText::new(app.tr("Time zone")).color(t.muted));
+            ui.horizontal(|ui| {
+                let mut tz = app.settings.time_offset.clone().unwrap_or_else(|| prefs.time_offset.clone());
+                if ui.add(egui::TextEdit::singleline(&mut tz).desired_width(90.0).hint_text("auto")).changed() {
+                    app.settings.time_offset = Some(tz.clone());
+                }
+                if app.settings.time_offset.is_some() && ui.button(app.tr("Apply")).clicked() {
+                    let v = app.settings.time_offset.take().unwrap_or_default();
+                    app.run("prefs.set", json!({"time_offset": v}));
+                }
+                let effective = mailcraft_engine::core::message::time::offset_text(app.tz());
+                let detected = mailcraft_engine::core::message::time::offset_text(mailcraft_engine::core::message::time::host_offset_minutes());
+                ui.label(
+                    RichText::new(app.language.fill(
+                        "Shown: UTC{effective} (auto = this device's zone, now UTC{detected})",
+                        &[("effective", &effective), ("detected", &detected)],
+                    ))
+                    .small()
+                    .color(t.muted),
+                );
+            });
             ui.end_row();
             ui.label(RichText::new(app.tr("Default account")).color(t.muted));
             let names: Vec<(String, String)> = app.session.config().accounts.iter().map(|a| (a.id.clone(), a.name.clone())).collect();

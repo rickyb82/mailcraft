@@ -8,9 +8,10 @@ use crate::theme::Tokens;
 use crate::widgets::icon_button;
 use crate::{Language, MailApp, Screen};
 
-/// `HH:MM` now (UTC-based clock, enough for "synced at").
-pub fn clock() -> String {
-    let (.., h, m, _, _) = mailcraft_engine::core::message::time::civil(mailcraft_engine::core::message::time::now());
+/// `HH:MM` now, in the shown time zone (an offset from UTC in minutes).
+pub fn clock(offset_minutes: i32) -> String {
+    use mailcraft_engine::core::message::time;
+    let (.., h, m, _, _) = time::civil(time::shifted(time::now(), offset_minutes));
     format!("{h:02}:{m:02}")
 }
 

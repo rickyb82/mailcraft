@@ -126,6 +126,11 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Discard" => "Elimina",
         "Attach files" => "Allega file",
         "Print" => "Stampa",
+        "Time zone" => "Fuso orario",
+        "Apply" => "Applica",
+        "Shown: UTC{effective} (auto = this device's zone, now UTC{detected})" => {
+            "Mostrato: UTC{effective} (auto = fuso di questo dispositivo, ora UTC{detected})"
+        }
         "Suggested replies…" => "Risposte suggerite…",
         "The assistant is available in the web app only" => "L'assistente è disponibile solo nell'app web",
         "Reply with this" => "Rispondi con questa",

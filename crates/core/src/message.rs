@@ -370,6 +370,46 @@ pub mod time {
         if italian { format!("{d:02}/{m:02}/{y}") } else { format!("{y}-{m:02}-{d:02}") }
     }
 
+    /// The machine's offset from UTC in minutes (the browser's on the web).
+    pub fn host_offset_minutes() -> i32 {
+        chrono::Local::now().offset().local_minus_utc() / 60
+    }
+
+    /// Reads a time zone preference: `auto` (none), `UTC`, `+02:00`, `-5`, `-05:30`, or minutes.
+    pub fn parse_offset(text: &str) -> Option<i32> {
+        let t = text.trim();
+        if t.is_empty() || t.eq_ignore_ascii_case("auto") || t.eq_ignore_ascii_case("system") || t.eq_ignore_ascii_case("local") {
+            return None;
+        }
+        if t.eq_ignore_ascii_case("utc") || t.eq_ignore_ascii_case("z") {
+            return Some(0);
+        }
+        let (sign, rest) = match t.chars().next() {
+            Some('+') => (1, &t[1..]),
+            Some('-') => (-1, &t[1..]),
+            _ => (1, t),
+        };
+        let minutes = match rest.split_once(':') {
+            Some((h, m)) => h.trim().parse::<i32>().ok()? * 60 + m.trim().parse::<i32>().ok()?,
+            None => {
+                let n = rest.trim().parse::<i32>().ok()?;
+                if n.abs() <= 14 { n * 60 } else { n }
+            }
+        };
+        let v = sign * minutes;
+        (-14 * 60..=14 * 60).contains(&v).then_some(v)
+    }
+
+    /// `+02:00` for an offset in minutes.
+    pub fn offset_text(minutes: i32) -> String {
+        format!("{}{:02}:{:02}", if minutes < 0 { '-' } else { '+' }, minutes.abs() / 60, minutes.abs() % 60)
+    }
+
+    /// Moves a UTC timestamp into a zone so [`civil`] gives wall-clock values.
+    pub fn shifted(ts: i64, offset_minutes: i32) -> i64 {
+        ts.saturating_add(i64::from(offset_minutes) * 60)
+    }
+
     /// A full date and time: `12 Oct 2026, 20:01`.
     pub fn long(ts: i64, italian: bool) -> String {
         if ts <= 0 {
@@ -384,6 +424,22 @@ pub mod time {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn time_zones_parse_and_shift() {
+        assert_eq!(time::parse_offset("auto"), None);
+        assert_eq!(time::parse_offset("+02:00"), Some(120));
+        assert_eq!(time::parse_offset("-05:30"), Some(-330));
+        assert_eq!(time::parse_offset("2"), Some(120));
+        assert_eq!(time::parse_offset("120"), Some(120));
+        assert_eq!(time::parse_offset("UTC"), Some(0));
+        assert_eq!(time::parse_offset("+15:00"), None);
+        assert_eq!(time::offset_text(120), "+02:00");
+        assert_eq!(time::offset_text(-330), "-05:30");
+        let ts = time::from_civil(2026, 10, 13, 22, 30, 0);
+        assert_eq!(time::long(time::shifted(ts, 120), true), "14 ott 2026, 00:30");
+        assert!(time::host_offset_minutes().abs() <= 14 * 60);
+    }
 
     #[test]
     fn addresses_parse_and_display() {

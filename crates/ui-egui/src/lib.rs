@@ -266,6 +266,16 @@ impl MailApp {
         self.language == Language::It
     }
 
+    /// The offset from UTC (minutes) dates are shown in: the preference, else the host's.
+    pub fn tz(&self) -> i32 {
+        self.session.config().preferences.offset_minutes()
+    }
+
+    /// A UTC timestamp moved into the shown time zone, for `time::short`/`time::long`.
+    pub fn local(&self, ts: i64) -> i64 {
+        core::message::time::shifted(ts, self.tz())
+    }
+
     /// A command's translated label and shortcut, for tooltips.
     pub fn tip(&self, command: &str) -> String {
         match mailcraft_engine::command(command) {
@@ -377,7 +387,7 @@ impl MailApp {
                         self.settings.reload = true;
                         self.toast(text);
                     }
-                    "mail.sync" => self.status = self.language.fill("Synced {time}", &[("time", &chrome::clock())]),
+                    "mail.sync" => self.status = self.language.fill("Synced {time}", &[("time", &chrome::clock(self.tz()))]),
                     _ => {}
                 },
                 Err(e) => {
@@ -538,7 +548,7 @@ impl MailApp {
             (self.tr("From"), core::message::join_addresses(&m.envelope.from)),
             (self.tr("To"), core::message::join_addresses(&m.envelope.to)),
             (self.tr("Cc"), core::message::join_addresses(&m.envelope.cc)),
-            (self.tr("Date"), core::message::time::long(m.envelope.date, italian)),
+            (self.tr("Date"), core::message::time::long(self.local(m.envelope.date), italian)),
         ];
         let title = if m.envelope.subject.trim().is_empty() { "(no subject)".to_string() } else { m.envelope.subject.clone() };
         let html = core::mime::printable(&title, &headers, &m.html, &m.text);
@@ -735,7 +745,7 @@ impl MailApp {
             self.tr("From"),
             core::message::join_addresses(&m.envelope.from),
             self.tr("Date"),
-            core::message::time::long(m.envelope.date, self.italian()),
+            core::message::time::long(self.local(m.envelope.date), self.italian()),
             self.tr("Subject"),
             m.envelope.subject,
             self.tr("To"),

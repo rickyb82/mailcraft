@@ -286,6 +286,9 @@ pub struct Preferences {
     /// Let the assistant use cloud models too (otherwise local models only: the mail never
     /// leaves the network).
     pub assist_cloud: bool,
+    /// The time zone dates are shown in: `auto` (the machine's or the browser's), or an
+    /// offset like `+02:00`.
+    pub time_offset: String,
 }
 
 impl Default for Preferences {
@@ -300,6 +303,7 @@ impl Default for Preferences {
             mark_read_on_open: true,
             assist_suggestions: true,
             assist_cloud: false,
+            time_offset: "auto".into(),
             undo_send_seconds: 5,
             default_account: String::new(),
         }
@@ -343,6 +347,15 @@ impl Preferences {
             "undo_send_seconds" | "undo_send" => self.undo_send_seconds = num(v, 30)?,
             "assist_suggestions" | "suggestions" | "suggerimenti" => self.assist_suggestions = bool_of(v)?,
             "assist_cloud" | "allow_cloud" | "cloud" => self.assist_cloud = bool_of(v)?,
+            "time_offset" | "timezone" | "time_zone" | "fuso" | "fuso_orario" => {
+                self.time_offset = match crate::message::time::parse_offset(v) {
+                    Some(m) => crate::message::time::offset_text(m),
+                    None if v.is_empty() || v.eq_ignore_ascii_case("auto") || v.eq_ignore_ascii_case("system") || v.eq_ignore_ascii_case("local") => {
+                        "auto".into()
+                    }
+                    None => return Err(Error::Config(format!("`time_offset` must be auto, UTC or an offset like +02:00, not `{v}`"))),
+                };
+            }
             "default_account" => self.default_account = slug(v),
             other => return Err(Error::Config(format!("unknown preference `{other}`"))),
         }
@@ -363,7 +376,13 @@ impl Preferences {
             ("default_account", self.default_account.clone()),
             ("assist_suggestions", self.assist_suggestions.to_string()),
             ("assist_cloud", self.assist_cloud.to_string()),
+            ("time_offset", self.time_offset.clone()),
         ]
+    }
+
+    /// The offset from UTC in minutes that dates are shown in: the preference, else the host's.
+    pub fn offset_minutes(&self) -> i32 {
+        crate::message::time::parse_offset(&self.time_offset).unwrap_or_else(crate::message::time::host_offset_minutes)
     }
 }
 

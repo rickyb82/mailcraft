@@ -159,7 +159,7 @@ fn message_card(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, account: &str,
                     ui.label(RichText::new(from.short()).strong().color(t.ui_text));
                     ui.label(RichText::new(format!("<{}>", from.email)).small().color(t.muted));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        ui.label(RichText::new(time::long(e.date, italian)).small().color(t.muted));
+                        ui.label(RichText::new(time::long(app.local(e.date), italian)).small().color(t.muted));
                         if e.has_attachments {
                             let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
                             icons::paint(ui.painter(), r, Icon::Attachment, t.muted);

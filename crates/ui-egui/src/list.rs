@@ -173,7 +173,8 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
     });
     let rows = rows(app);
     let open_key = view.open.as_ref().map(|(m, u)| (app.open_account(), m.clone(), *u));
-    let now = time::now();
+    let tz = app.tz();
+    let now = time::shifted(time::now(), tz);
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         if rows.is_empty() {
             ui.add_space(60.0);
@@ -249,7 +250,7 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 p.text(pos2(x, rect.center().y), Align2::LEFT_CENTER, row.count.to_string(), FontId::proportional(12.0), t.muted);
                 x += 18.0;
             }
-            let date = time::short(row.env.date, now, italian);
+            let date = time::short(time::shifted(row.env.date, tz), now, italian);
             let right = rect.right() - 14.0;
             let date_w = 64.0;
             let mut right_edge = right - date_w;
