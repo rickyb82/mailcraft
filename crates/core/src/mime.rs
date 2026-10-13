@@ -102,6 +102,7 @@ fn envelope_of(m: &mail_parser::Message<'_>, size: usize) -> Envelope {
     Envelope {
         uid: 0,
         mailbox: String::new(),
+        account: String::new(),
         subject: clean(m.subject().unwrap_or_default(), limits::MAX_TEXT),
         from: addresses(m.from()),
         to: addresses(m.to()),

@@ -1,4 +1,7 @@
-//! The message list: conversations (or messages) of the mailbox in view, or search results.
+//! The message list: conversations (or messages) of the mailbox in view, search results, or
+//! the merged list of every account (the unified view).
+
+use std::collections::HashMap;
 
 use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Stroke, StrokeKind, pos2, vec2};
 use mailcraft_engine::core::mailbox::Role;
@@ -6,14 +9,17 @@ use mailcraft_engine::core::message::{Envelope, time};
 use serde_json::json;
 
 use crate::MailApp;
+use crate::chrome::color_for;
 use crate::icons::{self, Icon};
 use crate::theme::Tokens;
 use crate::widgets::{divider, icon_button};
 
-/// One row: a conversation or a single message.
+/// One row: a conversation or a single message, with the account and mailbox it lives in.
 #[derive(Clone, Debug)]
 pub struct Row {
     pub uid: u32,
+    pub account: String,
+    pub mailbox: String,
     pub env: Envelope,
     pub count: usize,
     pub unread: u32,
@@ -22,23 +28,31 @@ pub struct Row {
     pub senders: String,
 }
 
+fn single(e: &Envelope, account: &str, mailbox: &str) -> Row {
+    Row {
+        uid: e.uid,
+        account: account.to_string(),
+        mailbox: mailbox.to_string(),
+        env: e.clone(),
+        count: 1,
+        unread: u32::from(!e.flags.seen),
+        flagged: e.flags.flagged,
+        has_attachments: e.has_attachments,
+        senders: e.sender().to_string(),
+    }
+}
+
 pub fn rows(app: &MailApp) -> Vec<Row> {
     let view = app.session.view();
+    if view.unified() {
+        // Every account at once: the engine tags each envelope with its account.
+        let list = if view.query.is_empty() { app.unified_rows() } else { view.results.clone() };
+        return list.iter().map(|e| single(e, &e.account, &e.mailbox)).collect();
+    }
+    let account = view.account.as_str();
     let Some(st) = app.session.current() else { return Vec::new() };
     if !view.query.is_empty() {
-        return view
-            .results
-            .iter()
-            .map(|e| Row {
-                uid: e.uid,
-                env: e.clone(),
-                count: 1,
-                unread: u32::from(!e.flags.seen),
-                flagged: e.flags.flagged,
-                has_attachments: e.has_attachments,
-                senders: e.sender().to_string(),
-            })
-            .collect();
+        return view.results.iter().map(|e| single(e, account, &e.mailbox)).collect();
     }
     if app.session.config().preferences.conversations {
         st.conversations(&view.mailbox)
@@ -52,6 +66,8 @@ pub fn rows(app: &MailApp) -> Vec<Row> {
                 };
                 Some(Row {
                     uid: c.latest,
+                    account: account.to_string(),
+                    mailbox: view.mailbox.clone(),
                     env,
                     count: c.members.len(),
                     unread: c.unread,
@@ -62,24 +78,18 @@ pub fn rows(app: &MailApp) -> Vec<Row> {
             })
             .collect()
     } else {
-        st.list(&view.mailbox)
-            .iter()
-            .map(|e| Row {
-                uid: e.uid,
-                env: e.clone(),
-                count: 1,
-                unread: u32::from(!e.flags.seen),
-                flagged: e.flags.flagged,
-                has_attachments: e.has_attachments,
-                senders: e.sender().to_string(),
-            })
-            .collect()
+        st.list(&view.mailbox).iter().map(|e| single(e, account, &view.mailbox)).collect()
     }
 }
 
-/// The uids shown, in order (what j/k walk).
+/// The uids shown, in order.
 pub fn visible_uids(app: &MailApp) -> Vec<u32> {
     rows(app).into_iter().map(|r| r.uid).collect()
+}
+
+/// `(account, mailbox, uid)` of every row shown, in order (what j/k walk).
+pub fn visible_keys(app: &MailApp) -> Vec<(String, String, u32)> {
+    rows(app).into_iter().map(|r| (r.account, r.mailbox, r.uid)).collect()
 }
 
 fn truncate(painter: &egui::Painter, text: &str, font: FontId, color: Color32, max_w: f32) -> std::sync::Arc<egui::Galley> {
@@ -91,9 +101,17 @@ fn truncate(painter: &egui::Painter, text: &str, font: FontId, color: Color32, m
 pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
     let view = app.session.view().clone();
     let account = view.account.clone();
+    let unified = view.unified();
+    let role = view.unified_role();
     let italian = app.italian();
-    let is_drafts = app.session.folder_for(&account, Role::Drafts).is_some_and(|d| d == view.mailbox);
-    let is_trash = app.session.folder_for(&account, Role::Trash).is_some_and(|d| d == view.mailbox);
+    let is_drafts = if unified { role == Role::Drafts } else { app.session.folder_for(&account, Role::Drafts).is_some_and(|d| d == view.mailbox) };
+    let is_trash = if unified { role == Role::Trash } else { app.session.folder_for(&account, Role::Trash).is_some_and(|d| d == view.mailbox) };
+    // The accounts' chips (name initial and colour) for the unified list.
+    let chips: HashMap<String, (String, Color32)> = if unified {
+        app.session.config().accounts.iter().map(|a| (a.id.clone(), (a.name.clone(), color_for(&a.email, &a.color)))).collect()
+    } else {
+        HashMap::new()
+    };
     // Header: mailbox name and the selection bar.
     egui::Frame::NONE.fill(t.chrome).inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -109,7 +127,12 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 }
             }
             if selected > 0 {
-                ui.label(RichText::new(format!("{selected} {}", app.tr("selected"))).color(t.muted));
+                let who = if unified {
+                    app.session.account(&view.selection_account).map(|a| format!(" · {}", a.name)).unwrap_or_default()
+                } else {
+                    String::new()
+                };
+                ui.label(RichText::new(format!("{selected} {}{who}", app.tr("selected"))).color(t.muted));
                 divider(ui, t);
                 if !is_trash && icon_button(ui, t, Icon::Archive, &app.tip("mail.archive"), true, false).clicked() {
                     app.act("mail.archive", json!({}));
@@ -132,12 +155,15 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 let mv = icon_button(ui, t, Icon::Move, app.tr("Move to"), true, false);
                 move_menu(app, &mv);
             } else {
-                let title = app
-                    .session
-                    .current()
-                    .and_then(|s| s.mailbox(&view.mailbox))
-                    .map(|m| if m.role == Role::Other { m.name.clone() } else { m.role.label(italian).to_string() })
-                    .unwrap_or_else(|| view.mailbox.clone());
+                let title = if unified {
+                    format!("{} · {}", role.label(italian), app.tr("All accounts"))
+                } else {
+                    app.session
+                        .current()
+                        .and_then(|s| s.mailbox(&view.mailbox))
+                        .map(|m| if m.role == Role::Other { m.name.clone() } else { m.role.label(italian).to_string() })
+                        .unwrap_or_else(|| view.mailbox.clone())
+                };
                 let title = if view.query.is_empty() { title } else { format!("{title} · “{}”", view.query) };
                 ui.label(RichText::new(title).strong().color(t.ui_text));
                 let n = all.len();
@@ -146,7 +172,7 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
         });
     });
     let rows = rows(app);
-    let open_uid = view.open.as_ref().map(|(_, u)| *u);
+    let open_key = view.open.as_ref().map(|(m, u)| (app.open_account(), m.clone(), *u));
     let now = time::now();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         if rows.is_empty() {
@@ -167,8 +193,9 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
         let width = ui.available_width();
         for row in &rows {
             let (rect, resp) = ui.allocate_exact_size(vec2(width, 48.0), Sense::click());
-            let selected = view.selection.contains(&row.uid);
-            let open = open_uid == Some(row.uid);
+            let same_place = |a: &str, m: &str| !unified || (a == row.account && m == row.mailbox);
+            let selected = view.selection.contains(&row.uid) && same_place(&view.selection_account, &view.selection_mailbox);
+            let open = open_key.as_ref().is_some_and(|(a, m, u)| *u == row.uid && same_place(a, m));
             let p = ui.painter();
             let fill = if selected {
                 t.active
@@ -195,12 +222,22 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 if row.flagged { Icon::StarFilled } else { Icon::Star },
                 if row.flagged { Color32::from_rgb(0xf4, 0xb4, 0x00) } else { t.muted },
             );
+            let mut x = rect.left() + 68.0;
+            // The account chip (unified view): its colour and initial.
+            let mut chip_rect = None;
+            if let Some((name, color)) = chips.get(&row.account) {
+                let c = Rect::from_center_size(pos2(x + 10.0, rect.center().y), vec2(20.0, 20.0));
+                p.circle_filled(c.center(), 10.0, *color);
+                let initial: String = name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().to_string()).unwrap_or_else(|| "?".into());
+                p.text(c.center(), Align2::CENTER_CENTER, initial, FontId::proportional(11.0), t.on_accent);
+                chip_rect = Some((c, name.clone()));
+                x += 28.0;
+            }
             let bold = row.unread > 0;
             let text_color = if bold { t.ui_text } else { t.muted.lerp_to_gamma(t.ui_text, 0.55) };
             let sender_font = if bold { FontId::new(14.0, egui::FontFamily::Proportional) } else { FontId::proportional(14.0) };
             let sender_w = 190.0_f32.min(width * 0.25);
             let sender = truncate(p, &row.senders, sender_font, text_color, sender_w);
-            let mut x = rect.left() + 68.0;
             if bold {
                 p.galley(pos2(x, rect.center().y - sender.size().y / 2.0), sender.clone(), t.ui_text);
                 p.galley(pos2(x + 0.5, rect.center().y - sender.size().y / 2.0), sender, t.ui_text);
@@ -234,6 +271,10 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 let snip = truncate(p, &format!("– {}", row.env.snippet), FontId::proportional(13.0), t.muted, right_edge - sx - 4.0);
                 p.galley(pos2(sx, rect.center().y - snip.size().y / 2.0), snip, t.muted);
             }
+            if let Some((c, name)) = &chip_rect {
+                ui.interact(*c, ui.id().with(("row-chip", &row.account, row.uid)), Sense::hover()).on_hover_text(name);
+            }
+            let place = json!({"account": row.account, "mailbox": row.mailbox});
             // Hover actions replace the date.
             if resp.hovered() && !selected {
                 let mut hx = right;
@@ -247,14 +288,17 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                     ),
                 ] {
                     let r = Rect::from_center_size(pos2(hx - 12.0, rect.center().y), vec2(26.0, 26.0));
-                    let hr = ui.interact(r, ui.id().with(("row-act", row.uid, cmd)), Sense::click());
+                    let hr = ui.interact(r, ui.id().with(("row-act", &row.account, row.uid, cmd)), Sense::click());
                     if hr.hovered() {
                         ui.painter().rect_filled(r, 6.0, t.active);
                     }
                     icons::paint(ui.painter(), r.shrink(4.0), icon, t.ui_text);
                     if hr.on_hover_text(app.tr(tip)).clicked() {
-                        let params =
-                            if cmd == "mail.markRead" { json!({"uids": [row.uid], "read": row.unread > 0}) } else { json!({"uids": [row.uid]}) };
+                        let mut params = place.clone();
+                        params["uids"] = json!([row.uid]);
+                        if cmd == "mail.markRead" {
+                            params["read"] = json!(row.unread > 0);
+                        }
                         app.act(cmd, params);
                     }
                     hx -= 30.0;
@@ -265,25 +309,33 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
             // Clicks: the checkbox toggles, the star stars, the row opens.
             if let Some(pointer) = resp.interact_pointer_pos().filter(|_| resp.clicked()) {
                 if cb.expand(6.0).contains(pointer) || ui.input(|i| i.modifiers.command || i.modifiers.shift) {
-                    let mut sel = view.selection.clone();
+                    // A selection spans one account and mailbox: a row elsewhere starts a new one.
+                    let mut sel = if same_place(&view.selection_account, &view.selection_mailbox) { view.selection.clone() } else { Vec::new() };
                     if let Some(i) = sel.iter().position(|u| *u == row.uid) {
                         sel.remove(i);
                     } else {
                         sel.push(row.uid);
                     }
-                    app.run("selection.set", json!({"uids": sel}));
+                    let mut params = place.clone();
+                    params["uids"] = json!(sel);
+                    app.run("selection.set", params);
                 } else if star.expand(6.0).contains(pointer) {
-                    app.act("mail.star", json!({"uids": [row.uid], "starred": !row.flagged}));
+                    let mut params = place.clone();
+                    params["uids"] = json!([row.uid]);
+                    params["starred"] = json!(!row.flagged);
+                    app.act("mail.star", params);
                 } else if is_drafts {
-                    app.edit_draft(row.uid);
+                    app.edit_draft(&row.account, &row.mailbox, row.uid);
                 } else {
-                    app.run("selection.set", json!({"uids": [row.uid]}));
-                    app.open(row.uid);
+                    let mut params = place.clone();
+                    params["uids"] = json!([row.uid]);
+                    app.run("selection.set", params);
+                    app.open_at(&row.account, &row.mailbox, row.uid);
                 }
             }
         }
-        // More.
-        if view.query.is_empty() {
+        // More (one mailbox at a time; the unified list shows each account's first page).
+        if view.query.is_empty() && !unified {
             let size = app.session.config().preferences.page_size as usize;
             let cached = app.session.current().map_or(0, |s| s.list(&view.mailbox).len());
             let total = app.session.current().and_then(|s| s.mailbox(&view.mailbox)).map_or(0, |m| m.total as usize);
@@ -302,14 +354,20 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
     });
 }
 
-/// The "move to" folder menu on a button.
+/// The "move to" folder menu on a button: the folders of the account that would act.
 pub fn move_menu(app: &mut MailApp, button: &egui::Response) {
+    let account = app.acting_account();
     let folders: Vec<(String, String)> = app
         .session
-        .current()
+        .state(&account)
         .map(|s| s.mailboxes.iter().filter(|m| !m.no_select).map(|m| (m.path.clone(), m.name.clone())).collect())
         .unwrap_or_default();
-    let current = app.session.view().mailbox.clone();
+    let view = app.session.view();
+    let current = if view.unified() {
+        if view.selection.is_empty() { view.open.as_ref().map(|(m, _)| m.clone()).unwrap_or_default() } else { view.selection_mailbox.clone() }
+    } else {
+        view.mailbox.clone()
+    };
     egui::Popup::menu(button).show(|ui| {
         ui.set_min_width(180.0);
         for (path, name) in folders {
@@ -317,7 +375,7 @@ pub fn move_menu(app: &mut MailApp, button: &egui::Response) {
                 continue;
             }
             if ui.button(name).clicked() {
-                app.act("mail.move", json!({"to": path}));
+                app.act("mail.move", json!({"to": path, "account": account}));
                 ui.close();
             }
         }

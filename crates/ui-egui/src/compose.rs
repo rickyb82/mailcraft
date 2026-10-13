@@ -65,6 +65,31 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                     }
                     egui::Frame::NONE.inner_margin(egui::Margin::symmetric(14, 8)).show(ui, |ui| {
                         ui.set_width(width - 28.0);
+                        // From: the sending account, when there is more than one.
+                        let accounts: Vec<(String, String, String)> =
+                            app.session.config().accounts.iter().map(|a| (a.id.clone(), a.name.clone(), a.email.clone())).collect();
+                        if accounts.len() > 1 {
+                            if c.from_account.is_empty() || !accounts.iter().any(|(id, ..)| *id == c.from_account) {
+                                c.from_account = app.acting_account();
+                            }
+                            ui.horizontal(|ui| {
+                                ui.add_sized(vec2(44.0, 24.0), egui::Label::new(RichText::new(app.tr("From")).color(t.muted)));
+                                let current = accounts
+                                    .iter()
+                                    .find(|(id, ..)| *id == c.from_account)
+                                    .map(|(_, name, email)| format!("{name} <{email}>"))
+                                    .unwrap_or_default();
+                                egui::ComboBox::from_id_salt("compose-from").selected_text(current).width(ui.available_width() - 70.0).show_ui(
+                                    ui,
+                                    |ui| {
+                                        for (id, name, email) in &accounts {
+                                            ui.selectable_value(&mut c.from_account, id.clone(), format!("{name} <{email}>"));
+                                        }
+                                    },
+                                );
+                            });
+                            ui.painter().hline(ui.min_rect().x_range(), ui.cursor().top(), Stroke::new(1.0, t.border));
+                        }
                         let field = |ui: &mut egui::Ui, label: &str, value: &mut String, hint: &str| {
                             ui.horizontal(|ui| {
                                 ui.add_sized(vec2(44.0, 24.0), egui::Label::new(RichText::new(label).color(t.muted)));

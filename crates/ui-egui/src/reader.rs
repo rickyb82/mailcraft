@@ -11,8 +11,8 @@ use crate::widgets::{divider, icon_button};
 use crate::{MailApp, Request};
 
 /// The members of the open conversation, oldest first.
-fn members(app: &MailApp, mailbox: &str, uid: u32) -> Vec<Envelope> {
-    let Some(st) = app.session.current() else { return Vec::new() };
+fn members(app: &MailApp, account: &str, mailbox: &str, uid: u32) -> Vec<Envelope> {
+    let Some(st) = app.session.state(account) else { return Vec::new() };
     if app.session.config().preferences.conversations
         && app.session.view().query.is_empty()
         && let Some(c) = st.conversations(mailbox).into_iter().find(|c| c.members.contains(&uid))
@@ -30,7 +30,8 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
         return;
     };
     let italian = app.italian();
-    let list = members(app, &mailbox, uid);
+    let account = app.open_account();
+    let list = members(app, &account, &mailbox, uid);
     let subject = list.last().map(|e| e.subject.clone()).unwrap_or_default();
     let starred = list.iter().any(|e| e.flags.flagged);
     // Action bar.
@@ -94,17 +95,17 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
             }
             ui.add_space(8.0);
             for e in &list {
-                message_card(app, ui, t, &mailbox, e, italian, list.len() == 1);
+                message_card(app, ui, t, &account, &mailbox, e, italian, list.len() == 1);
                 ui.add_space(8.0);
             }
         });
     });
 }
 
-fn message_card(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, mailbox: &str, e: &Envelope, italian: bool, only: bool) {
+#[allow(clippy::too_many_arguments)]
+fn message_card(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, account: &str, mailbox: &str, e: &Envelope, italian: bool, only: bool) {
     let expanded = only || app.expanded.contains(&e.uid);
-    let account = app.session.view().account.clone();
-    let message = app.session.state(&account).and_then(|s| s.message(mailbox, e.uid)).cloned();
+    let message = app.session.state(account).and_then(|s| s.message(mailbox, e.uid)).cloned();
     let frame = egui::Frame::NONE.fill(t.card).stroke(Stroke::new(1.0, t.border)).corner_radius(10).inner_margin(14);
     let inner = frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
@@ -171,7 +172,7 @@ fn message_card(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, mailbox: &str,
                                 t.ui_text,
                             );
                             if resp.on_hover_text(app.tr("Save")).clicked() {
-                                app.run("mail.attachment", json!({"uid": e.uid, "mailbox": mailbox, "index": a.index}));
+                                app.run("mail.attachment", json!({"uid": e.uid, "mailbox": mailbox, "account": account, "index": a.index}));
                             }
                         }
                     });
@@ -195,7 +196,7 @@ fn message_card(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, mailbox: &str,
     });
     if !expanded && inner.response.interact(Sense::click()).clicked() {
         app.expanded.push(e.uid);
-        app.run("mail.open", json!({"uid": e.uid, "mailbox": mailbox}));
+        app.run("mail.open", json!({"uid": e.uid, "mailbox": mailbox, "account": account}));
     }
     let _ = Color32::TRANSPARENT;
 }

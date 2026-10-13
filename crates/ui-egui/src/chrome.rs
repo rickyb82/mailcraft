@@ -24,6 +24,15 @@ pub fn avatar(ui: &mut egui::Ui, t: &Tokens, name: &str, color: Color32, size: f
     resp
 }
 
+/// The avatar of "every account": a stacked-inbox mark in the accent colour.
+pub fn unified_avatar(ui: &mut egui::Ui, t: &Tokens, size: f32) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let p = ui.painter();
+    p.circle_filled(rect.center(), size / 2.0, t.accent);
+    icons::paint(p, rect.shrink(size * 0.24), Icon::Inbox, t.on_accent);
+    resp
+}
+
 /// A stable colour for a name (senders) or the account's own colour.
 pub fn color_for(name: &str, custom: &str) -> Color32 {
     if let Some(c) = parse_hex(custom) {
@@ -100,7 +109,12 @@ pub fn top_bar(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 // Account chip: click for the Gmail-style account switcher.
                 let account = app.session.view().account.clone();
-                if let Some(a) = app.session.account(&account).cloned() {
+                if app.unified() {
+                    let chip = unified_avatar(ui, t, 30.0).on_hover_text(app.tr("All accounts"));
+                    account_menu(app, &chip, t);
+                    ui.label(RichText::new(app.tr("All accounts")).color(t.muted));
+                    ui.add_space(6.0);
+                } else if let Some(a) = app.session.account(&account).cloned() {
                     let color = color_for(&a.email, &a.color);
                     let chip = avatar(ui, t, &a.name, color, 30.0).on_hover_text(format!("{} <{}>", a.name, a.email));
                     account_menu(app, &chip, t);
@@ -137,10 +151,12 @@ pub fn top_bar(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
     });
 }
 
-/// The account switcher under the avatar: every account with its unread count, then
-/// "Add account" and "Settings".
+/// The account switcher under the avatar: "All accounts" (the unified inbox), every account
+/// with its unread count, then "Add account" and "Settings".
 fn account_menu(app: &mut MailApp, chip: &egui::Response, t: &Tokens) {
     let current = app.session.view().account.clone();
+    let unified = app.unified();
+    let total = app.total_unread();
     let accounts: Vec<(String, String, String, String, u32)> = app
         .session
         .config()
@@ -158,8 +174,37 @@ fn account_menu(app: &mut MailApp, chip: &egui::Response, t: &Tokens) {
         .collect();
     egui::Popup::menu(chip).show(|ui| {
         ui.set_min_width(260.0);
+        if accounts.len() > 1 {
+            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+            if unified {
+                ui.painter().rect_filled(rect, 8.0, t.active);
+            } else if resp.hovered() {
+                ui.painter().rect_filled(rect, 8.0, t.hover);
+            }
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 4.0))).layout(Layout::left_to_right(Align::Center)));
+            unified_avatar(&mut child, t, 30.0);
+            child.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ui.label(RichText::new(app.tr("All accounts")).color(if unified { t.accent } else { t.ui_text }));
+                ui.label(RichText::new(app.language.fill("{n} accounts", &[("n", &accounts.len().to_string())])).small().color(t.muted));
+            });
+            if total > 0 {
+                ui.painter().text(
+                    rect.right_center() - vec2(10.0, 0.0),
+                    egui::Align2::RIGHT_CENTER,
+                    total.to_string(),
+                    FontId::proportional(12.0),
+                    t.muted,
+                );
+            }
+            if resp.clicked() {
+                app.select_account(mailcraft_engine::ALL);
+                ui.close();
+            }
+            ui.separator();
+        }
         for (id, name, email, color, unread) in accounts {
-            let active = id == current;
+            let active = !unified && id == current;
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
             if active {
                 ui.painter().rect_filled(rect, 8.0, t.active);
@@ -215,7 +260,13 @@ pub fn status_bar(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                         &[("url", &app.session.server()), ("error", &p)],
                     )
                 })
-                .or_else(|| app.session.state(&account).and_then(|s| s.error.clone()));
+                .or_else(|| {
+                    if app.unified() {
+                        app.session.config().accounts.iter().find_map(|a| app.session.state(&a.id).and_then(|s| s.error.clone()))
+                    } else {
+                        app.session.state(&account).and_then(|s| s.error.clone())
+                    }
+                });
             match error {
                 Some(e) => {
                     let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());
@@ -227,9 +278,13 @@ pub fn status_bar(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let st = app.session.current();
-                let (n, unread) =
-                    st.map_or((0, 0), |s| (s.mailboxes.len(), s.by_role(mailcraft_engine::core::mailbox::Role::Inbox).map_or(0, |m| m.unread)));
+                let (n, unread) = if app.unified() {
+                    let n = app.session.config().accounts.iter().map(|a| app.session.state(&a.id).map_or(0, |s| s.mailboxes.len())).sum::<usize>();
+                    (n, app.total_unread())
+                } else {
+                    let st = app.session.current();
+                    st.map_or((0, 0), |s| (s.mailboxes.len(), s.by_role(mailcraft_engine::core::mailbox::Role::Inbox).map_or(0, |m| m.unread)))
+                };
                 ui.label(
                     RichText::new(app.language.fill("Mailboxes: {n} · Unread: {unread}", &[("n", &n.to_string()), ("unread", &unread.to_string())]))
                         .small()

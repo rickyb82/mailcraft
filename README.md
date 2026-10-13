@@ -32,6 +32,11 @@ triage and answer your mail. Part of the *craft* family (`gridcraft`, `ideacraft
   message list with stars, hover actions and bulk actions, a reading pane (or full view), a
   compose card docked at the bottom right, light and dark themes, English and Italian, keyboard
   shortcuts (`c` compose, `/` search, `j`/`k`, `e` archive, `#` trash, `s` star, `r` reply…).
+- **Several accounts, one inbox** — switch account from the avatar at the top right, like on
+  Gmail, or choose *All accounts*: a unified inbox (and starred, sent, drafts… across accounts)
+  where every row carries its account's colour, actions go to the right server and the compose
+  window has a *From* selector. Programmatically it is `account: "*"` (`mail.select`,
+  `mail.list`, `mail.search`, the MCP `list_messages`/`search`).
 - **Configuration in plain language (MCP)** — `mailcraft-cli mcp` is a Model Context Protocol
   server. Connect it to Claude Code, Claude Desktop or any MCP client and say *"configura la mia
   casella Aruba info@example.it, password …"* or *"dark theme, sync every 2 minutes"*: the

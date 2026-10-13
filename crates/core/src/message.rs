@@ -121,6 +121,9 @@ pub struct Flags {
 pub struct Envelope {
     pub uid: u32,
     pub mailbox: String,
+    /// The account id, filled in when envelopes of several accounts are listed together.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub account: String,
     pub subject: String,
     pub from: Vec<Address>,
     pub to: Vec<Address>,

@@ -44,8 +44,8 @@ try the tools. `--home DIR` uses another configuration directory.
 |---|---|
 | `sync` | Refresh folders and the first page |
 | `list_mailboxes` | Folders with roles and counts |
-| `list_messages` | A page of messages (uid, date, sender, subject, snippet, ● unread ★ starred 📎 attachment); `unread_only`, `role` |
-| `search` | `from:` `to:` `subject:` `is:unread` `is:starred` `has:attachment` `newer_than:7d` plus words |
+| `list_messages` | A page of messages (uid, date, sender, subject, snippet, ● unread ★ starred 📎 attachment); `unread_only`, `role`; `account: "*"` merges every account (each message names its account) |
+| `search` | `from:` `to:` `subject:` `is:unread` `is:starred` `has:attachment` `newer_than:7d` plus words; `account: "*"` searches every account |
 | `read_message` | Headers, text body (HTML reduced to text), attachment list; marks read unless `mark_read=false` |
 | `save_attachment` | Save an attachment to a path |
 | `send_mail`, `reply`, `forward` | Send (signature added), reply with quote (`all`), forward with attachments |

@@ -43,7 +43,7 @@ pub struct Server {
 }
 
 fn tools() -> Value {
-    let account = json!({"type": "string", "description": "Account id, address or name (default: the current account)"});
+    let account = json!({"type": "string", "description": "Account id, address or name (default: the current account); \"*\" = every account at once (list_messages, search, sync)"});
     let mailbox = json!({"type": "string", "description": "IMAP folder path (default: the inbox or the folder in view)"});
     let role = json!({"type": "string", "enum": ["inbox", "sent", "drafts", "trash", "spam", "archive"], "description": "A special folder instead of `mailbox`"});
     let uids = json!({"type": "array", "items": {"type": "integer", "minimum": 1}, "description": "Message uids from list_messages/search"});
@@ -282,7 +282,18 @@ fn list_text(envelopes: &[Value], italian: bool) -> String {
             let snippet = e["snippet"].as_str().unwrap_or("");
             let snippet =
                 if snippet.chars().count() > 90 { format!("{}…", snippet.chars().take(90).collect::<String>()) } else { snippet.to_string() };
-            format!("[{}] {:<3} {:>9}  {} — {} — {}", e["uid"], flag(e), date, from, e["subject"].as_str().unwrap_or("(no subject)"), snippet)
+            // The unified list names each message's account: the uid alone is not enough there.
+            let account = e["account"].as_str().filter(|a| !a.is_empty()).map(|a| format!(" @{a}")).unwrap_or_default();
+            format!(
+                "[{}{}] {:<3} {:>9}  {} — {} — {}",
+                e["uid"],
+                account,
+                flag(e),
+                date,
+                from,
+                e["subject"].as_str().unwrap_or("(no subject)"),
+                snippet
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")

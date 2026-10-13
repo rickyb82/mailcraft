@@ -1,6 +1,6 @@
 //! Renders the UI offscreen to a PNG with a small software rasteriser: no window, no GPU.
 //!
-//! `cargo run -p mailcraft-ui-egui --example snapshot -- out.png [--dark] [--lang it] [--open N] [--compose] [--settings] [--search QUERY] [--folder sent|drafts|trash] [--size WxH]`
+//! `cargo run -p mailcraft-ui-egui --example snapshot -- out.png [--dark] [--lang it] [--unified] [--open N] [--compose] [--settings] [--search QUERY] [--folder sent|drafts|trash] [--size WxH]`
 //! The demo mailbox (mock backend) is shown; no account or network is needed.
 
 use std::collections::HashMap;
@@ -100,6 +100,7 @@ fn main() {
     let mut language = mailcraft_ui_egui::Language::En;
     let mut open: Option<usize> = None;
     let mut compose = false;
+    let mut unified = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -107,6 +108,11 @@ fn main() {
             "--dark" => dark = true,
             "--open" => open = it.next().and_then(|s| s.parse().ok()).or(Some(0)),
             "--compose" => compose = true,
+            "--unified" => {
+                unified = true;
+                let _ = app.session.run_blocking("mail.select", json!({"account": "*"}));
+                let _ = app.session.run_blocking("mail.list", json!({"account": "*", "refresh": true}));
+            }
             "--settings" => app.screen = Screen::Settings,
             "--search" => {
                 let q = it.next().cloned().unwrap_or_default();
@@ -115,9 +121,13 @@ fn main() {
             }
             "--folder" => {
                 let role = it.next().and_then(|r| mailcraft_ui_egui::core::mailbox::Role::parse(r)).unwrap_or_default();
-                let account = app.session.view().account.clone();
-                if let Some(path) = app.session.folder_for(&account, role) {
-                    let _ = app.session.run_blocking("mail.select", json!({"mailbox": path}));
+                if unified {
+                    let _ = app.session.run_blocking("mail.select", json!({"account": "*", "role": role.name()}));
+                } else {
+                    let account = app.session.view().account.clone();
+                    if let Some(path) = app.session.folder_for(&account, role) {
+                        let _ = app.session.run_blocking("mail.select", json!({"mailbox": path}));
+                    }
                 }
             }
             "--size" => {
@@ -133,11 +143,16 @@ fn main() {
     app.language = language;
     app.dark = dark;
     if let Some(n) = open {
-        let mailbox = app.session.view().mailbox.clone();
-        let uid = app.session.current().and_then(|s| s.list(&mailbox).get(n).map(|e| e.uid));
-        if let Some(uid) = uid {
-            let _ = app.session.run_blocking("selection.set", json!({"uids": [uid]}));
-            let _ = app.session.run_blocking("mail.open", json!({"uid": uid, "mailbox": mailbox}));
+        let target = if unified {
+            app.unified_rows().get(n).map(|e| (e.account.clone(), e.mailbox.clone(), e.uid))
+        } else {
+            let mailbox = app.session.view().mailbox.clone();
+            let account = app.session.view().account.clone();
+            app.session.current().and_then(|s| s.list(&mailbox).get(n).map(|e| (account, mailbox.clone(), e.uid)))
+        };
+        if let Some((account, mailbox, uid)) = target {
+            let _ = app.session.run_blocking("selection.set", json!({"uids": [uid], "account": account, "mailbox": mailbox}));
+            let _ = app.session.run_blocking("mail.open", json!({"uid": uid, "mailbox": mailbox, "account": account}));
         }
     }
     if compose {

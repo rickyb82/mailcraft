@@ -72,15 +72,37 @@ impl Paths {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct View {
+    /// An account id, or [`ALL`] for the unified view across every account (then `mailbox`
+    /// holds a role name: `inbox`, `starred`, `sent`…).
     pub account: String,
     pub mailbox: String,
     pub query: String,
-    /// Search results for `query` (empty when there is no search).
+    /// Search results for `query` (empty when there is no search); in the unified view each
+    /// envelope carries its `account`.
     pub results: Vec<Envelope>,
     pub selection: Vec<u32>,
+    /// The account and mailbox the selection belongs to (the unified view mixes accounts).
+    pub selection_account: String,
+    pub selection_mailbox: String,
     /// The message open in the reading pane: (mailbox, uid).
     pub open: Option<(String, u32)>,
+    /// The account of the open message.
+    pub open_account: String,
     pub page: usize,
+}
+
+/// The view's account id for "every account at once" (the unified inbox).
+pub const ALL: &str = "*";
+
+impl View {
+    pub fn unified(&self) -> bool {
+        self.account == ALL
+    }
+
+    /// The role shown by the unified view (`inbox` when unset).
+    pub fn unified_role(&self) -> Role {
+        Role::parse(&self.mailbox).unwrap_or(Role::Inbox)
+    }
 }
 
 /// A finished job, as [`Session::pump`] reports it.
@@ -199,6 +221,32 @@ pub trait MailSession {
     }
 }
 
+/// `(account, mailbox)` for a role across every account (the unified view).
+pub fn unified_folders<'a>(config: &Config, state: impl Fn(&str) -> Option<&'a AccountState>, role: Role) -> Vec<(String, String)> {
+    let role = if role == Role::Starred { Role::Inbox } else { role };
+    config.accounts.iter().filter_map(|a| folder_for(config, state(&a.id), &a.id, role).map(|m| (a.id.clone(), m))).collect()
+}
+
+/// The merged, account-tagged list behind a unified role (starred = the flagged inbox mail).
+pub fn unified_list<'a>(config: &Config, state: impl Fn(&str) -> Option<&'a AccountState>, role: Role) -> Vec<Envelope> {
+    let mut out = Vec::new();
+    for (account, mailbox) in unified_folders(config, &state, role) {
+        if let Some(st) = state(&account) {
+            for e in st.list(&mailbox) {
+                if role == Role::Starred && !e.flags.flagged {
+                    continue;
+                }
+                let mut e = e.clone();
+                e.account = account.clone();
+                out.push(e);
+            }
+        }
+    }
+    out.sort_by(|a, b| b.date.cmp(&a.date).then(b.uid.cmp(&a.uid)));
+    out.truncate(mailcraft_core::limits::MAX_ENVELOPES);
+    out
+}
+
 /// The IMAP path of a special folder: configured, detected, or `None`.
 pub fn folder_for(config: &Config, state: Option<&AccountState>, account: &str, role: Role) -> Option<String> {
     let a = config.account(account)?;
@@ -312,8 +360,14 @@ impl Session {
                 error: st.error.clone(),
                 ..RemoteState::default()
             };
-            if *id == self.view.account {
-                let mailbox = self.view.mailbox.clone();
+            let unified_mailbox = if self.view.unified() {
+                let role = if self.view.unified_role() == Role::Starred { Role::Inbox } else { self.view.unified_role() };
+                self.folder_for(id, role)
+            } else {
+                None
+            };
+            if *id == self.view.account || unified_mailbox.is_some() {
+                let mailbox = unified_mailbox.unwrap_or_else(|| self.view.mailbox.clone());
                 rs.envelopes.insert(mailbox.clone(), st.list(&mailbox).iter().take(mailcraft_core::limits::MAX_PAGE * 4).cloned().collect());
                 // Only the messages of the mailbox in view, as text (the HTML is reduced here).
                 for ((mb, uid), m) in &st.messages {
@@ -343,10 +397,23 @@ impl Session {
         self.revision
     }
 
+    /// The accounts and mailboxes behind a unified role: `(account, mailbox)` for every account
+    /// that has that folder.
+    pub fn unified_folders(&self, role: Role) -> Vec<(String, String)> {
+        unified_folders(&self.config, |id| self.store.get(id), role)
+    }
+
+    /// The merged list of a unified role, newest first, each envelope tagged with its account.
+    pub fn unified_list(&self, role: Role) -> Vec<Envelope> {
+        unified_list(&self.config, |id| self.store.get(id), role)
+    }
+
     /// An in-memory session on the demo mailbox (`MockBackend::demo`), already synced.
     pub fn demo() -> Self {
-        let mock = mailcraft_core::mock::MockBackend::demo();
-        let factory: BackendFactory = Box::new(move |_| Box::new(mock.clone()));
+        // One demo mailbox per account, so acting on one never touches the other.
+        let mocks: std::collections::HashMap<String, mailcraft_core::mock::MockBackend> =
+            ["demo", "lavoro"].into_iter().map(|id| (id.to_string(), mailcraft_core::mock::MockBackend::demo())).collect();
+        let factory: BackendFactory = Box::new(move |a| Box::new(mocks.get(&a.id).cloned().unwrap_or_else(mailcraft_core::mock::MockBackend::demo)));
         let mut s = Self::new(factory, None);
         let account = Account {
             id: "demo".into(),
@@ -654,6 +721,14 @@ impl Session {
                 state.update_envelopes(&mailbox, list.clone());
                 if self.view.account == account && self.view.mailbox == mailbox && !self.view.query.is_empty() {
                     self.view.results = list.clone();
+                } else if self.view.unified() && !self.view.query.is_empty() {
+                    // Merge this account's hits into the unified results.
+                    self.view.results.retain(|e| !(e.account == account && e.mailbox == mailbox));
+                    self.view.results.extend(list.iter().cloned().map(|mut e| {
+                        e.account = account.to_string();
+                        e
+                    }));
+                    self.view.results.sort_by(|a, b| b.date.cmp(&a.date).then(b.uid.cmp(&a.uid)));
                 }
                 Ok(json!({"mailbox": mailbox, "query": query.text, "envelopes": list.iter().map(envelope_json).collect::<Vec<_>>()}))
             }
@@ -730,6 +805,8 @@ pub fn envelope_json(e: &Envelope) -> Value {
     json!({
         "uid": e.uid,
         "mailbox": e.mailbox,
+        "account": e.account,
+        "account": e.account,
         "subject": e.subject,
         "from": e.from.iter().map(|a| a.display()).collect::<Vec<_>>(),
         "to": e.to.iter().map(|a| a.display()).collect::<Vec<_>>(),
@@ -927,11 +1004,52 @@ mod tests {
     }
 
     #[test]
+    fn unified_view_merges_every_account() {
+        let mut s = Session::demo();
+        assert_eq!(s.config().accounts.len(), 2);
+        let v = s.execute("mail.select", &json!({"account": "*"})).unwrap();
+        assert_eq!(v["unified"], true);
+        assert!(v["jobs"].is_array(), "the second account's inbox is loaded: {v}");
+        assert!(s.view().unified());
+        s.run_blocking("mail.list", json!({"account": "*", "refresh": true})).unwrap();
+        let v = s.execute("mail.list", &json!({"account": "*"})).unwrap();
+        let list = s.unified_list(Role::Inbox);
+        assert_eq!(list.len(), 24, "both demo accounts, 12 each");
+        assert!(list.iter().any(|e| e.account == "demo") && list.iter().any(|e| e.account == "lavoro"));
+        assert!(list.windows(2).all(|w| w[0].date >= w[1].date), "newest first across accounts");
+        assert_eq!(v["total"], 24);
+        assert!(v["envelopes"][0]["account"].as_str().is_some_and(|a| !a.is_empty()));
+        // Starred = flagged inbox mail of every account.
+        assert_eq!(s.unified_list(Role::Starred).len(), 2);
+        // Search across accounts merges the hits with their account.
+        let _ = s.run_blocking("mail.search", json!({"account": "*", "query": "fattura"})).unwrap();
+        assert_eq!(s.view().results.len(), 2);
+        assert_eq!(s.view().results.iter().filter(|e| e.account == "lavoro").count(), 1);
+        s.execute("mail.search", &json!({"account": "*", "query": ""})).unwrap();
+        // Open, select and act in the unified view name the account.
+        let e = list.iter().find(|e| e.account == "lavoro").unwrap().clone();
+        s.run_blocking("mail.open", json!({"account": "lavoro", "mailbox": e.mailbox, "uid": e.uid})).unwrap();
+        assert_eq!(s.view().open_account, "lavoro");
+        assert_eq!(s.view().open, Some((e.mailbox.clone(), e.uid)));
+        s.execute("selection.set", &json!({"account": "lavoro", "mailbox": e.mailbox, "uids": [e.uid]})).unwrap();
+        let before = s.state("lavoro").unwrap().list(&e.mailbox).len();
+        s.run_blocking("mail.archive", json!({})).unwrap();
+        assert_eq!(s.state("lavoro").unwrap().list(&e.mailbox).len(), before - 1);
+        assert!(s.view().unified(), "acting keeps the unified view");
+        assert_eq!(s.execute("view.get", &json!({})).unwrap()["unified"], true);
+        // Leaving the unified view.
+        s.run_blocking("mail.select", json!({"account": "demo", "mailbox": "INBOX"})).unwrap();
+        assert!(!s.view().unified());
+    }
+
+    #[test]
     fn every_command_survives_empty_params() {
         let mut s = Session::demo();
         for c in COMMANDS {
             let _ = s.execute(c.id, &json!({}));
             let _ = s.execute(c.id, &json!({"uids": [1, 999], "uid": 999, "mailbox": "Nope", "email": "x", "id": "ghost", "to": "", "query": "", "key": "", "page": 999999}));
+            let _ = s.execute(c.id, &json!({"account": "*", "role": "nope", "uids": [1], "uid": 1, "query": "x"}));
+            let _ = s.execute(c.id, &json!({"account": "*", "role": "trash", "to": "a@b.co", "subject": "s", "body": "b"}));
         }
         for _ in 0..20 {
             s.pump();

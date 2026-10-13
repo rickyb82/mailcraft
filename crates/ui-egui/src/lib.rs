@@ -23,8 +23,9 @@ pub use i18n::Language;
 pub use mailcraft_engine::MailSession;
 use mailcraft_engine::core::mailbox::Role;
 use mailcraft_engine::core::message::DraftAttachment;
+use mailcraft_engine::store::AccountState;
 pub use mailcraft_engine::{self as engine, core};
-use mailcraft_engine::{Completed, Session};
+use mailcraft_engine::{ALL, Completed, Session, unified_list};
 use serde_json::{Value, json};
 
 /// Which screen fills the window.
@@ -64,6 +65,8 @@ pub struct Compose {
     pub forward_attachments: Vec<String>,
     pub minimized: bool,
     pub focus_body: bool,
+    /// The account the message is sent from (its id); empty = the view's account.
+    pub from_account: String,
 }
 
 /// The whole app state the UI keeps on top of the engine session.
@@ -190,6 +193,59 @@ impl MailApp {
         }
     }
 
+    /// The unified view (every account at once) is on.
+    pub fn unified(&self) -> bool {
+        self.session.view().unified()
+    }
+
+    /// The account of the open message: outside the unified view, the view's account.
+    pub fn open_account(&self) -> String {
+        let v = self.session.view();
+        if !v.open_account.is_empty() {
+            v.open_account.clone()
+        } else if v.unified() {
+            String::new()
+        } else {
+            v.account.clone()
+        }
+    }
+
+    /// The cached state of the open message's account.
+    pub fn open_state(&self) -> Option<&AccountState> {
+        self.session.state(&self.open_account())
+    }
+
+    /// The account an action without an explicit one goes to: the view's, or in the unified
+    /// view the selection's, the open message's, else the first account (as the engine does).
+    pub fn acting_account(&self) -> String {
+        let v = self.session.view();
+        if !v.unified() {
+            return v.account.clone();
+        }
+        if !v.selection.is_empty() && !v.selection_account.is_empty() {
+            return v.selection_account.clone();
+        }
+        if !v.open_account.is_empty() {
+            return v.open_account.clone();
+        }
+        self.session.config().accounts.first().map(|a| a.id.clone()).unwrap_or_default()
+    }
+
+    /// The merged list behind the unified view's role, each envelope tagged with its account.
+    pub fn unified_rows(&self) -> Vec<core::message::Envelope> {
+        unified_list(self.session.config(), |id| self.session.state(id), self.session.view().unified_role())
+    }
+
+    /// Unread inbox mail across every account.
+    pub fn total_unread(&self) -> u32 {
+        self.session
+            .config()
+            .accounts
+            .iter()
+            .map(|a| self.session.state(&a.id).and_then(|s| s.by_role(Role::Inbox)).map_or(0, |m| m.unread))
+            .fold(0, u32::saturating_add)
+    }
+
     fn toast(&mut self, text: String) {
         self.toast = Some((text, Instant::now()));
     }
@@ -262,6 +318,14 @@ impl MailApp {
     }
 
     pub fn select_role(&mut self, role: Role) {
+        if self.unified() {
+            self.search.clear();
+            self.reading_full = false;
+            self.expanded.clear();
+            self.run("mail.select", json!({"account": ALL, "role": role.name()}));
+            let _ = self.run("mail.search", json!({"account": ALL, "query": ""}));
+            return;
+        }
         let account = self.session.view().account.clone();
         match self.session.folder_for(&account, role) {
             Some(path) => self.select_mailbox(&path),
@@ -269,7 +333,15 @@ impl MailApp {
         }
     }
 
+    /// Switches to an account, or to every account at once (`"*"`, the unified inbox).
     pub fn select_account(&mut self, id: &str) {
+        if id == ALL {
+            self.search.clear();
+            self.reading_full = false;
+            self.expanded.clear();
+            self.run("mail.select", json!({"account": ALL, "role": Role::Inbox.name()}));
+            return;
+        }
         self.run("account.select", json!({"id": id}));
         self.search.clear();
         self.reading_full = false;
@@ -278,10 +350,21 @@ impl MailApp {
         }
     }
 
-    /// Opens a message in the reader (fetching it when needed).
+    /// Opens a message of the mailbox in view (or, in the unified view, of the selection).
     pub fn open(&mut self, uid: u32) {
-        let mailbox = self.session.view().mailbox.clone();
-        self.run("mail.open", json!({"uid": uid, "mailbox": mailbox}));
+        let v = self.session.view();
+        let (account, mailbox) =
+            if v.unified() { (v.selection_account.clone(), v.selection_mailbox.clone()) } else { (v.account.clone(), v.mailbox.clone()) };
+        self.open_at(&account, &mailbox, uid);
+    }
+
+    /// Opens a message in the reader (fetching it when needed).
+    pub fn open_at(&mut self, account: &str, mailbox: &str, uid: u32) {
+        let mut prm = json!({"uid": uid, "mailbox": mailbox});
+        if !account.is_empty() {
+            prm["account"] = json!(account);
+        }
+        self.run("mail.open", prm);
         self.expanded = vec![uid];
         if !self.session.config().preferences.reading_pane {
             self.reading_full = true;
@@ -307,11 +390,25 @@ impl MailApp {
     /// Runs a move-style command on the selection (or the open message), with an undo toast.
     pub fn act(&mut self, command: &str, params: Value) {
         let mut prm = params;
+        let view = self.session.view().clone();
         if prm.get("uids").is_none()
-            && self.session.view().selection.is_empty()
-            && let Some((_, uid)) = self.session.view().open.clone()
+            && view.selection.is_empty()
+            && let Some((mailbox, uid)) = view.open.clone()
         {
             prm["uids"] = json!([uid]);
+            if view.unified() && !view.open_account.is_empty() {
+                prm["account"] = json!(view.open_account);
+                prm["mailbox"] = json!(mailbox);
+            }
+        } else if prm.get("uids").is_some()
+            && prm.get("account").is_none()
+            && view.unified()
+            && !view.open_account.is_empty()
+            && let Some((mailbox, _)) = view.open.clone()
+        {
+            // The reader's actions name the open message: they go to its account.
+            prm["account"] = json!(view.open_account);
+            prm["mailbox"] = json!(mailbox);
         }
         if self.run(command, prm).is_some() {
             let label = match command {
@@ -334,13 +431,13 @@ impl MailApp {
     }
 
     pub fn compose_new(&mut self) {
-        self.compose = Some(Compose { focus_body: false, ..Compose::default() });
+        self.compose = Some(Compose { focus_body: false, from_account: self.acting_account(), ..Compose::default() });
     }
 
     /// Opens a reply (or reply-all) to the open message, with the quote in the body.
     pub fn compose_reply(&mut self, all: bool) {
         let Some((mailbox, uid)) = self.session.view().open.clone() else { return };
-        let account = self.session.view().account.clone();
+        let account = self.open_account();
         let Some(st) = self.session.state(&account) else { return };
         let Some(m) = st.message(&mailbox, uid) else {
             self.status = self.tr("Wait for the message to load").to_string();
@@ -377,13 +474,14 @@ impl MailApp {
             body: format!("\n{quote}"),
             reply_to: Some((mailbox, uid, all)),
             focus_body: true,
+            from_account: account,
             ..Compose::default()
         });
     }
 
     pub fn compose_forward(&mut self) {
         let Some((mailbox, uid)) = self.session.view().open.clone() else { return };
-        let account = self.session.view().account.clone();
+        let account = self.open_account();
         let Some(m) = self.session.state(&account).and_then(|st| st.message(&mailbox, uid)) else {
             self.status = self.tr("Wait for the message to load").to_string();
             return;
@@ -407,18 +505,23 @@ impl MailApp {
             m.body_text()
         );
         let forward_attachments = m.attachments.iter().filter(|a| !a.inline).map(|a| a.name.clone()).collect();
-        self.compose = Some(Compose { subject, body, forward_attachments, forward_of: Some((mailbox, uid)), ..Compose::default() });
+        self.compose =
+            Some(Compose { subject, body, forward_attachments, forward_of: Some((mailbox, uid)), from_account: account, ..Compose::default() });
     }
 
     fn compose_params(&self, c: &Compose) -> Value {
         let mut v = json!({"to": c.to, "cc": c.cc, "bcc": c.bcc, "subject": c.subject, "body": c.body});
+        if !c.from_account.is_empty() {
+            v["account"] = json!(c.from_account);
+        }
         if let Some(uid) = c.draft_uid {
             v["draft_uid"] = json!(uid);
         }
         if let Some((mailbox, uid, _)) = &c.reply_to {
             v["reply_to_uid"] = json!(uid);
             v["reply_mailbox"] = json!(mailbox);
-            if let Some(m) = self.session.current().and_then(|st| st.message(mailbox, *uid)) {
+            let account = if c.from_account.is_empty() { self.session.view().account.clone() } else { c.from_account.clone() };
+            if let Some(m) = self.session.state(&account).and_then(|st| st.message(mailbox, *uid)) {
                 v["in_reply_to"] = json!(m.envelope.message_id);
                 let mut refs = m.envelope.references.clone();
                 refs.push(m.envelope.message_id.clone());
@@ -445,7 +548,11 @@ impl MailApp {
         let ok = if let Some((mailbox, uid)) = c.forward_of.clone() {
             let header = self.tr("---------- Forwarded message ----------");
             let note = c.body.split(header).next().unwrap_or_default().trim().to_string();
-            self.run("mail.forward", json!({"uid": uid, "mailbox": mailbox, "to": format!("{}, {}", c.to, c.cc), "body": note})).is_some()
+            let mut prm = json!({"uid": uid, "mailbox": mailbox, "to": format!("{}, {}", c.to, c.cc), "body": note});
+            if !c.from_account.is_empty() {
+                prm["account"] = json!(c.from_account);
+            }
+            self.run("mail.forward", prm).is_some()
         } else {
             let params = self.compose_params(&c);
             self.run("mail.send", params).is_some()
@@ -472,11 +579,9 @@ impl MailApp {
         }
     }
 
-    /// Opens a draft from the Drafts folder in the compose window.
-    pub fn edit_draft(&mut self, uid: u32) {
-        let mailbox = self.session.view().mailbox.clone();
-        let account = self.session.view().account.clone();
-        match self.session.state(&account).and_then(|st| st.message(&mailbox, uid)) {
+    /// Opens a draft from a Drafts folder in the compose window.
+    pub fn edit_draft(&mut self, account: &str, mailbox: &str, uid: u32) {
+        match self.session.state(account).and_then(|st| st.message(mailbox, uid)) {
             Some(m) => {
                 self.compose = Some(Compose {
                     to: core::message::join_addresses(&m.envelope.to),
@@ -485,11 +590,12 @@ impl MailApp {
                     subject: m.envelope.subject.clone(),
                     body: m.body_text(),
                     draft_uid: Some(uid),
+                    from_account: account.to_string(),
                     ..Compose::default()
                 });
             }
             None => {
-                self.run("mail.open", json!({"uid": uid, "mailbox": mailbox, "mark_read": false}));
+                self.run("mail.open", json!({"uid": uid, "mailbox": mailbox, "account": account, "mark_read": false}));
                 self.expanded = vec![uid];
             }
         }
@@ -497,8 +603,14 @@ impl MailApp {
 
     pub fn window_title(&self) -> String {
         let account = self.session.view().account.clone();
-        let unread = self.session.current().and_then(|s| s.by_role(Role::Inbox)).map_or(0, |m| m.unread);
-        let name = self.session.account(&account).map(|a| a.email.clone()).unwrap_or_default();
+        let (unread, name) = if self.unified() {
+            (self.total_unread(), self.tr("All accounts").to_string())
+        } else {
+            (
+                self.session.current().and_then(|s| s.by_role(Role::Inbox)).map_or(0, |m| m.unread),
+                self.session.account(&account).map(|a| a.email.clone()).unwrap_or_default(),
+            )
+        };
         match (unread, name.is_empty()) {
             (0, true) => "MailCraft".to_string(),
             (0, false) => format!("{name} – MailCraft"),
@@ -566,21 +678,28 @@ impl MailApp {
 
     fn open_envelope(&self) -> Option<core::message::Envelope> {
         let (mailbox, uid) = self.session.view().open.clone()?;
-        self.session.current()?.envelope(&mailbox, uid).cloned()
+        self.open_state()?.envelope(&mailbox, uid).cloned()
     }
 
     /// Moves the selection (and the open message) up or down the list.
     fn step(&mut self, delta: i32) {
-        let uids = list::visible_uids(self);
-        if uids.is_empty() {
+        let keys = list::visible_keys(self);
+        if keys.is_empty() {
             return;
         }
-        let current = self.session.view().open.as_ref().map(|(_, u)| *u).or_else(|| self.session.view().selection.first().copied());
-        let i = current.and_then(|u| uids.iter().position(|x| *x == u)).map_or(0, |i| (i as i32 + delta).clamp(0, uids.len() as i32 - 1) as usize);
-        if let Some(uid) = uids.get(i).copied() {
-            self.run("selection.set", json!({"uids": [uid]}));
+        let v = self.session.view();
+        let current = v
+            .open
+            .as_ref()
+            .map(|(m, u)| (self.open_account(), m.clone(), *u))
+            .or_else(|| v.selection.first().map(|u| (v.selection_account.clone(), v.selection_mailbox.clone(), *u)));
+        let unified = v.unified();
+        let position = |k: &(String, String, u32)| keys.iter().position(|x| x.2 == k.2 && (!unified || (x.0 == k.0 && x.1 == k.1)));
+        let i = current.as_ref().and_then(position).map_or(0, |i| (i as i32 + delta).clamp(0, keys.len() as i32 - 1) as usize);
+        if let Some((account, mailbox, uid)) = keys.get(i).cloned() {
+            self.run("selection.set", json!({"uids": [uid], "account": account, "mailbox": mailbox}));
             if self.session.view().open.is_some() {
-                self.open(uid);
+                self.open_at(&account, &mailbox, uid);
             }
         }
     }
@@ -694,6 +813,36 @@ mod tests {
         app.select_role(Role::Sent);
         settle(&mut app, &ctx);
         assert!(!list::visible_uids(&app).is_empty());
+        // The unified inbox: both accounts in one list, actions go to the right account.
+        app.select_account("*");
+        settle(&mut app, &ctx);
+        assert!(app.unified());
+        assert!(app.window_title().starts_with('(') && app.window_title().contains("Tutti gli account"), "{}", app.window_title());
+        let rows = list::rows(&app);
+        assert!(rows.len() > 12, "{} rows", rows.len());
+        assert!(rows.iter().any(|r| r.account == "demo") && rows.iter().any(|r| r.account == "lavoro"));
+        let other = rows.iter().find(|r| r.account == "lavoro").cloned().unwrap();
+        app.run("selection.set", json!({"uids": [other.uid], "account": other.account, "mailbox": other.mailbox}));
+        app.open_at(&other.account, &other.mailbox, other.uid);
+        settle(&mut app, &ctx);
+        assert_eq!(app.open_account(), "lavoro");
+        assert!(app.session.state("lavoro").unwrap().message("INBOX", other.uid).is_some());
+        frame(&mut app, &ctx, vec![key(egui::Key::R, egui::Modifiers::NONE)]);
+        assert_eq!(app.compose.as_ref().map(|c| c.from_account.as_str()), Some("lavoro"));
+        app.compose = None;
+        frame(&mut app, &ctx, vec![]); // the body's focus goes with the window
+        let before = app.session.state("lavoro").unwrap().list("INBOX").len();
+        frame(&mut app, &ctx, vec![key(egui::Key::E, egui::Modifiers::NONE)]);
+        settle(&mut app, &ctx);
+        assert_eq!(app.session.state("lavoro").unwrap().list("INBOX").len(), before - 1, "archived on lavoro");
+        assert!(app.unified(), "still unified after acting");
+        frame(&mut app, &ctx, vec![key(egui::Key::J, egui::Modifiers::NONE)]);
+        assert_eq!(app.session.view().selection.len(), 1);
+        app.select_role(Role::Starred);
+        settle(&mut app, &ctx);
+        assert_eq!(list::rows(&app).len(), 2, "starred mail of both accounts");
+        app.select_account("demo");
+        assert!(!app.unified());
         app.screen = Screen::Settings;
         app.dark = true;
         frame(&mut app, &ctx, vec![]);

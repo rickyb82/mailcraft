@@ -94,6 +94,8 @@ pub const LABELS: &[&str] = &[
     "Folders",
     "Accounts",
     "Add account",
+    "All accounts",
+    "{n} accounts",
     "No messages",
     "No messages match the search",
     "Loading…",

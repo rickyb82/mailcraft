@@ -43,6 +43,8 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Folders" => "Cartelle",
         "Accounts" => "Account",
         "Add account" => "Aggiungi account",
+        "All accounts" => "Tutti gli account",
+        "{n} accounts" => "{n} account",
         "No messages" => "Nessun messaggio",
         "No messages match the search" => "Nessun messaggio corrisponde alla ricerca",
         "Loading…" => "Caricamento…",

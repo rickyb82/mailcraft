@@ -25,6 +25,10 @@
 - Multi-user server (`--users-dir`): a session and a data directory per user, a service token
   for the framework (`X-Mailcraft-User`), per-user tokens minted by the framework for the page
   and the user's MCP process (`mailcraft-cli mcp --server URL --token T`), Docker image.
+- Several accounts per user: the Gmail-style switcher under the avatar and the unified view
+  (`account: "*"`): every account's inbox, starred, sent, drafts… merged newest first with an
+  account chip per row, cross-account search, actions routed to the message's account, a
+  *From* selector in the compose window.
 
 ## Next (0.2)
 
@@ -38,7 +42,7 @@
 
 ## Later
 
-- Calendar invitations (iCalendar), contacts (CardDAV), unified inbox across accounts.
+- Calendar invitations (iCalendar), contacts (CardDAV).
 - Rules/filters, signatures per identity, aliases.
 
 ## Progress log
@@ -48,3 +52,4 @@
 | 2026-10-13 | 0.1: model, autoconfig, IMAP/SMTP transport with in-process test servers, engine with commands and cache, Gmail-style egui UI, MCP server with configuration prompts, CLI |
 | 2026-10-13 | Web app: `MailSession` abstraction, snapshots by revision, `mailcraft-remote`, `mailcraft-cli serve` (HTTP API, static files, token), `apps/mailcraft-web` on GitHub Pages |
 | 2026-10-13 | Multi-user server for frameworks: `--users-dir`, service and per-user tokens, `/api/users`, MCP over the server (`mcp --server`), Dockerfile and compose, deploy guide |
+| 2026-10-13 | Account switcher under the avatar; unified inbox across accounts (`account: "*"` in `mail.select`/`mail.list`/`mail.search`, account-tagged envelopes, *All accounts* in the navigation and the switcher, account chips in the list, *From* selector when composing) |

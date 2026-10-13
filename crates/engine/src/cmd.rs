@@ -10,7 +10,7 @@ use mailcraft_core::{limits, mime};
 use serde_json::{Value, json};
 
 use crate::worker::JobKind;
-use crate::{Error, Result, Session, account_json, envelope_json, mailbox_json, message_json};
+use crate::{ALL, Error, Result, Session, account_json, envelope_json, mailbox_json, message_json};
 
 /// A command's description (the catalogue the CLI, the MCP server and the interface show).
 #[derive(Clone, Copy, Debug)]
@@ -82,7 +82,7 @@ pub const COMMANDS: &[Command] = &[
         "Open Mailbox",
         "View › Mailbox",
         "",
-        "{account?, mailbox? | role?: inbox|sent|drafts|trash|spam|archive|starred} → the view; loads the mailbox when not cached",
+        "{account? (\"*\" = every account, unified), mailbox? | role?: inbox|sent|drafts|trash|spam|archive|starred} → the view; loads the mailbox when not cached",
         true,
     ),
     c(
@@ -90,7 +90,7 @@ pub const COMMANDS: &[Command] = &[
         "Messages",
         "View › Messages",
         "",
-        "{account?, mailbox? | role?, page?, refresh?: bool} → cached envelopes (and a job when refreshing or not cached)",
+        "{account? (\"*\" merges every account by role), mailbox? | role?, page?, refresh?: bool} → cached envelopes (and a job when refreshing or not cached)",
         true,
     ),
     c(
@@ -98,7 +98,7 @@ pub const COMMANDS: &[Command] = &[
         "Search",
         "Mail › Search",
         "/",
-        "{query (from: to: subject: is:unread is:starred has:attachment newer_than:7d + words), account?, mailbox?, page?} → job",
+        "{query (from: to: subject: is:unread is:starred has:attachment newer_than:7d + words), account? (\"*\" = every account), mailbox? | role?, page?} → job(s)",
         true,
     ),
     c("mail.open", "Open Message", "Mail › Open", "Enter", "{uid, mailbox?, account?} → the message (text, html, attachments); marks it read", true),
@@ -226,7 +226,22 @@ impl Session {
     fn account_id(&self, prm: &Value) -> Result<String> {
         let key = p::opt_str(prm, "account").or_else(|| p::opt_str(prm, "id")).filter(|s| !s.is_empty());
         match key {
+            Some(ALL) => Ok(ALL.to_string()),
             Some(k) => self.config.find(k).map(|a| a.id.clone()).ok_or_else(|| Error::Core(mailcraft_core::Error::NoAccount(k.to_string()))),
+            None if self.view.unified() => {
+                // The unified view mixes accounts: act on the selection's or the open message's.
+                if !self.view.selection.is_empty() && !self.view.selection_account.is_empty() {
+                    Ok(self.view.selection_account.clone())
+                } else if !self.view.open_account.is_empty() {
+                    Ok(self.view.open_account.clone())
+                } else {
+                    self.config
+                        .accounts
+                        .first()
+                        .map(|a| a.id.clone())
+                        .ok_or_else(|| Error::Param("no account configured: add one with account.add".into()))
+                }
+            }
             None if !self.view.account.is_empty() => Ok(self.view.account.clone()),
             None => Err(Error::Param("no account configured: add one with account.add".into())),
         }
@@ -244,7 +259,29 @@ impl Session {
         if self.view.account == account && !self.view.mailbox.is_empty() {
             return Ok(self.view.mailbox.clone());
         }
+        if self.view.unified() {
+            if !self.view.selection.is_empty() && self.view.selection_account == account && !self.view.selection_mailbox.is_empty() {
+                return Ok(self.view.selection_mailbox.clone());
+            }
+            if self.view.open_account == account
+                && let Some((m, _)) = &self.view.open
+            {
+                return Ok(m.clone());
+            }
+            if let Some(m) = self.folder_for(account, if self.view.unified_role() == Role::Starred { Role::Inbox } else { self.view.unified_role() })
+            {
+                return Ok(m);
+            }
+        }
         Ok("INBOX".into())
+    }
+
+    /// The role asked for (`role` param) or the unified view's.
+    fn unified_role_of(&self, prm: &Value) -> Result<Role> {
+        match p::opt_str(prm, "role").filter(|r| !r.is_empty()) {
+            Some(r) => Role::parse(r).ok_or_else(|| Error::Param(format!("unknown role `{r}`"))),
+            None => Ok(if self.view.unified() { self.view.unified_role() } else { Role::Inbox }),
+        }
     }
 
     fn special(&self, account: &str, role: Role) -> Result<String> {
@@ -539,7 +576,9 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             Ok(json!({"preferences": prefs_json(&s.config.preferences)}))
         }
         "mail.sync" => {
-            let all = p::opt_bool(prm, "all").unwrap_or(false) || (p::opt_str(prm, "account").is_none() && s.view.account.is_empty());
+            let all = p::opt_bool(prm, "all").unwrap_or(false)
+                || p::opt_str(prm, "account") == Some(ALL)
+                || (p::opt_str(prm, "account").is_none() && (s.view.account.is_empty() || s.view.unified()));
             let ids: Vec<String> = if all { s.config.accounts.iter().map(|a| a.id.clone()).collect() } else { vec![s.account_id(prm)?] };
             if ids.is_empty() {
                 return Err(Error::Param("no account configured: add one with account.add".into()));
@@ -558,6 +597,32 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             let list: Vec<Value> = s.store.get(&id).map(|st| st.mailboxes.iter().map(|m| mailbox_json(m, italian)).collect()).unwrap_or_default();
             Ok(json!({"account": id, "mailboxes": list}))
         }
+        "mail.select" if s.account_id(prm)? == ALL || p::opt_bool(prm, "unified") == Some(true) => {
+            let role = s.unified_role_of(prm)?;
+            if !s.view.unified() || s.view.mailbox != role.name() {
+                s.view = crate::View { account: ALL.into(), mailbox: role.name().into(), ..crate::View::default() };
+            }
+            let folders = s.unified_folders(role);
+            let mut jobs = Vec::new();
+            for (account, mailbox) in &folders {
+                if s.store.get(account).is_some_and(|st| st.mailboxes.is_empty())
+                    && let Ok(job) = s.submit("mail.sync", account, JobKind::Mailboxes)
+                {
+                    jobs.push(job);
+                }
+                if s.store.get(account).is_some_and(|st| st.list(mailbox).is_empty()) {
+                    let page = Page::new(0, s.page_size());
+                    if let Ok(job) = s.submit("mail.list", account, JobKind::Envelopes { mailbox: mailbox.clone(), page }) {
+                        jobs.push(job);
+                    }
+                }
+            }
+            let mut v = json!({"account": ALL, "unified": true, "role": role.name(), "folders": folders.iter().map(|(a, m)| json!({"account": a, "mailbox": m})).collect::<Vec<_>>()});
+            if !jobs.is_empty() {
+                v["jobs"] = json!(jobs);
+            }
+            Ok(v)
+        }
         "mail.select" => {
             let id = s.account_id(prm)?;
             let mailbox = s.mailbox_of(prm, &id)?;
@@ -570,6 +635,32 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
                 let page = Page::new(0, s.page_size());
                 let job = s.submit("mail.list", &id, JobKind::Envelopes { mailbox, page })?;
                 v["job"] = json!(job);
+            }
+            Ok(v)
+        }
+        "mail.list" if s.account_id(prm)? == ALL => {
+            let role = s.unified_role_of(prm)?;
+            let size = s.page_size();
+            let page_no = p::opt_u32(prm, "page").unwrap_or(0) as usize;
+            let offset = page_no.saturating_mul(size).min(limits::MAX_ENVELOPES);
+            let list = s.unified_list(role);
+            let page: Vec<Value> = list.iter().skip(offset).take(size).map(envelope_json).collect();
+            let mut v = json!({"account": ALL, "unified": true, "role": role.name(), "page": page_no, "total": list.len(), "envelopes": page, "cached": true});
+            if p::opt_bool(prm, "refresh").unwrap_or(false) || list.is_empty() {
+                let mut jobs = Vec::new();
+                for (account, mailbox) in s.unified_folders(role) {
+                    if s.store.get(&account).is_some_and(|st| st.mailboxes.is_empty())
+                        && let Ok(job) = s.submit("mail.sync", &account, JobKind::Mailboxes)
+                    {
+                        jobs.push(job);
+                    }
+                    if let Ok(job) = s.submit("mail.list", &account, JobKind::Envelopes { mailbox, page: Page::new(0, size) }) {
+                        jobs.push(job);
+                    }
+                }
+                if !jobs.is_empty() {
+                    v["jobs"] = json!(jobs);
+                }
             }
             Ok(v)
         }
@@ -588,6 +679,29 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
                 v["job"] = json!(job);
             }
             Ok(v)
+        }
+        "mail.search" if s.account_id(prm)? == ALL => {
+            let role = s.unified_role_of(prm)?;
+            let text = prm.get("query").and_then(Value::as_str).unwrap_or_default().trim().to_string();
+            let query = SearchQuery::parse(&text);
+            if s.view.unified() {
+                s.view.query = text.clone();
+                s.view.results.clear();
+            }
+            if query.is_empty() {
+                return Ok(json!({"account": ALL, "query": "", "envelopes": []}));
+            }
+            let size = s.page_size();
+            let mut jobs = Vec::new();
+            for (account, mailbox) in s.unified_folders(role) {
+                if let Ok(job) = s.submit("mail.search", &account, JobKind::Search { mailbox, query: query.clone(), page: Page::new(0, size) }) {
+                    jobs.push(job);
+                }
+            }
+            if jobs.is_empty() {
+                return Err(Error::Param("no account to search".into()));
+            }
+            Ok(json!({"jobs": jobs}))
         }
         "mail.search" => {
             let id = s.account_id(prm)?;
@@ -612,8 +726,9 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             let id = s.account_id(prm)?;
             let mailbox = s.mailbox_of(prm, &id)?;
             let uid = p::u32(prm, "uid")?;
-            if s.view.account == id {
+            if s.view.account == id || s.view.unified() {
                 s.view.open = Some((mailbox.clone(), uid));
+                s.view.open_account = id.clone();
             }
             let mark = s.config.preferences.mark_read_on_open && p::opt_bool(prm, "mark_read").unwrap_or(true);
             let unread = s.store.get(&id).and_then(|st| st.envelope(&mailbox, uid)).is_some_and(|e| !e.flags.seen);
@@ -785,16 +900,50 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
         }
         "selection.set" => {
             let uids = p::uids(prm, &[]).unwrap_or_default();
+            let account = match p::opt_str(prm, "account").filter(|a| !a.is_empty()) {
+                Some(a) => s.config.find(a).map(|x| x.id.clone()).unwrap_or_default(),
+                None if s.view.unified() => s.view.open_account.clone(),
+                None => s.view.account.clone(),
+            };
+            let mailbox = p::opt_str(prm, "mailbox").filter(|m| !m.is_empty()).map(str::to_string).unwrap_or_else(|| {
+                if s.view.unified() {
+                    s.view.open.as_ref().map(|(m, _)| m.clone()).or_else(|| s.folder_for(&account, s.view.unified_role())).unwrap_or_default()
+                } else {
+                    s.view.mailbox.clone()
+                }
+            });
             s.view.selection = uids;
-            Ok(json!({"selection": s.view.selection}))
+            s.view.selection_account = account;
+            s.view.selection_mailbox = mailbox;
+            Ok(json!({"selection": s.view.selection, "account": s.view.selection_account, "mailbox": s.view.selection_mailbox}))
         }
         "selection.all" => {
+            if s.view.unified() {
+                // One account at a time: the open message's (or the first) account's list.
+                let account = if s.view.open_account.is_empty() {
+                    s.config.accounts.first().map(|a| a.id.clone()).unwrap_or_default()
+                } else {
+                    s.view.open_account.clone()
+                };
+                let mailbox = s.mailbox_of(&json!({}), &account)?;
+                let list: Vec<u32> = if s.view.query.is_empty() {
+                    s.store.get(&account).map(|st| st.list(&mailbox).iter().map(|e| e.uid).collect()).unwrap_or_default()
+                } else {
+                    s.view.results.iter().filter(|e| e.account == account).map(|e| e.uid).collect()
+                };
+                s.view.selection = list;
+                s.view.selection_account = account;
+                s.view.selection_mailbox = mailbox;
+                return Ok(json!({"selection": s.view.selection, "account": s.view.selection_account}));
+            }
             let list: Vec<u32> = if s.view.query.is_empty() {
                 s.current().map(|st| st.list(&s.view.mailbox).iter().map(|e| e.uid).collect()).unwrap_or_default()
             } else {
                 s.view.results.iter().map(|e| e.uid).collect()
             };
             s.view.selection = list;
+            s.view.selection_account = s.view.account.clone();
+            s.view.selection_mailbox = s.view.mailbox.clone();
             Ok(json!({"selection": s.view.selection}))
         }
         "selection.clear" => {
@@ -803,7 +952,10 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
         }
         "view.get" => Ok(json!({
             "account": s.view.account,
+            "unified": s.view.unified(),
             "mailbox": s.view.mailbox,
+            "selection_account": s.view.selection_account,
+            "open_account": s.view.open_account,
             "query": s.view.query,
             "selection": s.view.selection,
             "open": s.view.open.as_ref().map(|(m, u)| json!({"mailbox": m, "uid": u})),
