@@ -59,6 +59,23 @@ impl AccountForm {
         }
     }
 
+    /// Fills the servers, name and notes from an `account.suggest` answer.
+    pub fn apply_suggestion(&mut self, v: &Value) {
+        self.imap_host = v["imap"]["host"].as_str().unwrap_or("").to_string();
+        self.imap_port = v["imap"]["port"].to_string();
+        self.imap_security = Security::parse(v["imap"]["security"].as_str().unwrap_or("tls")).unwrap_or_default();
+        self.smtp_host = v["smtp"]["host"].as_str().unwrap_or("").to_string();
+        self.smtp_port = v["smtp"]["port"].to_string();
+        self.smtp_security = Security::parse(v["smtp"]["security"].as_str().unwrap_or("tls")).unwrap_or_default();
+        if self.name.trim().is_empty() {
+            self.name = v["provider"]
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| mailcraft_engine::core::account::domain_of(&self.email).unwrap_or_default());
+        }
+        self.notes = v["notes"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+    }
+
     fn params(&self) -> Value {
         let mut v = json!({
             "email": self.email,
@@ -91,6 +108,8 @@ pub struct SettingsState {
     pub result: String,
     /// Reload the form from the saved account (after a probe changed the servers).
     pub reload: bool,
+    /// The server URL being typed (web app).
+    pub server_draft: Option<String>,
 }
 
 fn section(ui: &mut egui::Ui, t: &Tokens, text: &str) {
@@ -129,6 +148,7 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                         }
                     });
                 });
+                server_section(app, ui, t);
                 accounts_section(app, ui, t);
                 if app.settings.editing.is_some() {
                     account_form(app, ui, t);
@@ -271,34 +291,16 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
     });
     match action {
         Some("suggest") => {
-            if let Some(v) = app.run("account.suggest", json!({"email": f.email, "language": app.language.code()})) {
-                f.imap_host = v["imap"]["host"].as_str().unwrap_or("").to_string();
-                f.imap_port = v["imap"]["port"].to_string();
-                f.imap_security = Security::parse(v["imap"]["security"].as_str().unwrap_or("tls")).unwrap_or_default();
-                f.smtp_host = v["smtp"]["host"].as_str().unwrap_or("").to_string();
-                f.smtp_port = v["smtp"]["port"].to_string();
-                f.smtp_security = Security::parse(v["smtp"]["security"].as_str().unwrap_or("tls")).unwrap_or_default();
-                if f.name.trim().is_empty() {
-                    f.name = v["provider"]
-                        .as_str()
-                        .map(str::to_string)
-                        .unwrap_or_else(|| mailcraft_engine::core::account::domain_of(&f.email).unwrap_or_default());
-                }
-                f.notes = v["notes"].as_array().map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
-            }
+            // The answer reaches the form through MailApp::handle_result (local or remote).
+            app.settings.editing = Some(f.clone());
+            app.run("account.suggest", json!({"email": f.email, "language": app.language.code()}));
+            return;
         }
         Some("save") => {
             let cmd = if f.id.is_some() { "account.update" } else { "account.add" };
-            if let Some(v) = app.run(cmd, f.params()) {
-                let id = v["id"].as_str().unwrap_or_default().to_string();
-                f.id = Some(id.clone());
-                f.password.clear();
-                app.settings.result = app.tr("Saved").to_string();
-                if app.session.has_password(&id) {
-                    app.run("account.test", json!({"id": id}));
-                }
-                app.settings.reload = true;
-            }
+            app.settings.editing = Some(f.clone());
+            app.run(cmd, f.params());
+            return;
         }
         Some("probe") => {
             if let Some(id) = &f.id {
@@ -329,6 +331,35 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
         _ => {}
     }
     app.settings.editing = Some(f);
+}
+
+fn server_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
+    let server = app.session.server();
+    if server.is_empty() {
+        return;
+    }
+    section(ui, t, app.tr("Web app server"));
+    let frame = egui::Frame::NONE.fill(t.card).stroke(Stroke::new(1.0, t.border)).corner_radius(10).inner_margin(16);
+    frame.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new(app.tr("The web app keeps your accounts on a mailcraft-cli server (your computer or your own machine). Start it with `mailcraft-cli serve`, then connect here.")).color(t.muted));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(app.tr("Server")).color(t.muted));
+            let mut url = app.settings.server_draft.clone().unwrap_or(server.clone());
+            if ui.add(egui::TextEdit::singleline(&mut url).desired_width(320.0)).changed() {
+                app.settings.server_draft = Some(url.clone());
+            }
+            if ui.button(app.tr("Connect")).clicked() {
+                let u = url.trim().to_string();
+                app.session.set_server(&u);
+                app.settings.server_draft = None;
+            }
+            match app.session.problem() {
+                Some(p) => ui.label(RichText::new(app.language.tr_message(&p)).small().color(Color32::from_rgb(0xe5, 0x48, 0x4d))),
+                None => ui.label(RichText::new(app.tr("Connected")).small().color(t.accent)),
+            };
+        });
+    });
 }
 
 fn preferences_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {

@@ -171,15 +171,7 @@ fn message_card(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, mailbox: &str,
                                 t.ui_text,
                             );
                             if resp.on_hover_text(app.tr("Save")).clicked() {
-                                let data = app
-                                    .session
-                                    .state(&account)
-                                    .and_then(|s| s.raw.get(&(mailbox.to_string(), e.uid)))
-                                    .map(|raw| mailcraft_engine::core::mime::attachments(raw))
-                                    .and_then(|all| all.into_iter().nth(a.index));
-                                if let Some(d) = data {
-                                    app.requests.push(Request::SaveAttachment { name: d.name, data: d.data });
-                                }
+                                app.run("mail.attachment", json!({"uid": e.uid, "mailbox": mailbox, "index": a.index}));
                             }
                         }
                     });

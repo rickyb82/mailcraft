@@ -13,5 +13,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 mail-parser = { workspace = true }
 
+[dependencies.web-time]
+workspace = true
+
 [lints]
 workspace = true

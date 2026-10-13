@@ -18,6 +18,9 @@ triage and answer your mail. Part of the *craft* family (`gridcraft`, `ideacraft
 
 ## What it does
 
+- **Web app and desktop app** — the same Rust interface runs in the browser (WebAssembly, served
+  from GitHub Pages or by `mailcraft-cli serve`) and natively; the web app talks to a small
+  server that holds the accounts, so the browser never sees IMAP or passwords.
 - **Classic mail, modern client** — IMAP (TLS, STARTTLS) and SMTP (TLS, STARTTLS, plain for local
   bridges) over rustls. Folders with roles (inbox, sent, drafts, trash, spam, archive) detected
   from SPECIAL-USE attributes and English/Italian names; unread counts; conversations grouped by
@@ -49,6 +52,26 @@ triage and answer your mail. Part of the *craft* family (`gridcraft`, `ideacraft
   your user can read (0600), the cache per account. No telemetry, no cloud.
 
 ## Run it
+
+### Web app (like Gmail, in your browser)
+
+A browser cannot speak IMAP, so the web app mirrors a small server that keeps your accounts
+and connections — your own computer by default:
+
+```sh
+cargo install --path apps/mailcraft-cli
+mailcraft-cli serve --open            # http://127.0.0.1:7878, opens the browser
+```
+
+Then open **https://rickyb82.github.io/mailcraft/** (the page served from GitHub Pages connects
+to `http://127.0.0.1:7878`; change the server in Settings › *Web app server*), or serve the page
+from the server itself: build the app once (`cd apps/mailcraft-web && trunk build --release`)
+and run `mailcraft-cli serve --static dist/web --open`. To reach your mail from anywhere, run
+the server on a machine of yours behind an HTTPS reverse proxy with
+`mailcraft-cli serve --bind 0.0.0.0:7878 --token SECRET` and open the page with `?token=SECRET`.
+`mailcraft-cli serve --demo` shows the built-in mailbox.
+
+### Desktop app
 
 ```sh
 cargo run --release -p mailcraft            # the desktop app (opens Settings until an account exists)
@@ -91,10 +114,12 @@ cargo run -p mailcraft-ui-egui --example snapshot -- out.png [--lang it] [--dark
 
 - Workspace layout (checked by `cargo xtask layers`): `core` (model, autoconfig, MIME, mock
   backend) → `net` (IMAP/SMTP) → `engine` (session, commands, cache, worker) → `ui-egui` / `mcp`
-  → `apps/mailcraft`, `apps/mailcraft-cli`. See [docs/architecture.md](docs/architecture.md).
-- `cargo xtask ci` runs fmt, clippy (`-D warnings`), the tests and the layer check. The transport
-  is tested against small IMAP and SMTP servers that run inside the tests, so no network is
-  needed; a real-server smoke test is `mailcraft-cli add you@… --password …`.
+  / `remote` (the engine mirrored over HTTP) → `apps/mailcraft`, `apps/mailcraft-cli` (CLI, MCP,
+  `serve`), `apps/mailcraft-web` (WebAssembly). See [docs/architecture.md](docs/architecture.md).
+- `cargo xtask ci` runs fmt, clippy (`-D warnings`), the tests, the layer check and the wasm
+  build. The transport is tested against small IMAP and SMTP servers that run inside the tests
+  and the web path against a `serve` instance started by the tests, so no network is needed; a
+  real-server smoke test is `mailcraft-cli add you@… --password …`.
 - Icons, themes and the demo mailbox are drawn or written in code: no vendor artwork
   ([ATTRIBUTION.md](ATTRIBUTION.md)).
 

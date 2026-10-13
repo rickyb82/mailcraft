@@ -13,6 +13,9 @@ egui = { workspace = true }
 serde_json = { workspace = true }
 sys-locale = { workspace = true }
 
+[dependencies.web-time]
+workspace = true
+
 [lints]
 workspace = true
 

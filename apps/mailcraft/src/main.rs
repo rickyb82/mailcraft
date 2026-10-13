@@ -95,7 +95,7 @@ fn main() -> Result<(), String> {
         };
         Session::new(mailcraft_net::factory(), Some(paths))
     };
-    let mut app = MailApp::new(session);
+    let mut app = MailApp::new(Box::new(session));
     if let Some(l) = lang {
         app.language = l;
     }

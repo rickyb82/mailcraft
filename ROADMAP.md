@@ -1,7 +1,7 @@
 # MailCraft roadmap
 
-> **Stage:** 0.1 — a working client and MCP server, tested against in-process IMAP/SMTP servers;
-> the first real-mailbox round trips are the next thing to prove.
+> **Stage:** 0.1 — a working web app, desktop client and MCP server, tested against in-process
+> IMAP/SMTP servers; the first real-mailbox round trips are the next thing to prove.
 
 ## Now (0.1 — done)
 
@@ -19,6 +19,9 @@
 - MCP server: 29 tools (configuration and mail), 4 prompts (`setup_account`, `triage_inbox`,
   `write_email`, `configure`), 2 resources; CLI with `mcp`, `add`, `test`, `list`, `read`,
   `search`, `send`, `set`, `run`.
+- Web app (WebAssembly, GitHub Pages) on top of `mailcraft-cli serve`: the engine's state is
+  mirrored by revision over a tiny HTTP API, commands run on the server, attachments go through
+  the browser's picker and downloads; token-protected when bound beyond localhost.
 
 ## Next (0.2)
 
@@ -28,7 +31,7 @@
 - IMAP IDLE for push notifications; background sync in the desktop app.
 - Undo for archive/trash; snooze; labels/keywords (`$label`); PGP later.
 - Address book from sent mail with completion in the compose window.
-- Web app via a local bridge service (IMAP cannot run in a browser).
+- Web app: HTTPS built into `serve`, push updates instead of polling, PWA install.
 
 ## Later
 
@@ -40,3 +43,4 @@
 | Date | Change |
 |---|---|
 | 2026-10-13 | 0.1: model, autoconfig, IMAP/SMTP transport with in-process test servers, engine with commands and cache, Gmail-style egui UI, MCP server with configuration prompts, CLI |
+| 2026-10-13 | Web app: `MailSession` abstraction, snapshots by revision, `mailcraft-remote`, `mailcraft-cli serve` (HTTP API, static files, token), `apps/mailcraft-web` on GitHub Pages |

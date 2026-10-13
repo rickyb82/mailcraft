@@ -1,4 +1,5 @@
-//! Repository tasks: `cargo xtask ci` (fmt, clippy, tests, layers) and `cargo xtask layers`.
+//! Repository tasks: `cargo xtask ci` (fmt, clippy, tests, layers, wasm), `cargo xtask layers`
+//! and `cargo xtask wasm`.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
@@ -11,8 +12,10 @@ const LAYERS: &[(&str, &[&str])] = &[
     ("crates/engine", &["mailcraft-core"]),
     ("crates/ui-egui", &["mailcraft-engine", "egui"]),
     ("crates/mcp", &["mailcraft-engine"]),
+    ("crates/remote", &["mailcraft-engine"]),
     ("apps/mailcraft", &["mailcraft-ui-egui", "mailcraft-net", "egui", "eframe", "rfd"]),
     ("apps/mailcraft-cli", &["mailcraft-engine", "mailcraft-net", "mailcraft-mcp"]),
+    ("apps/mailcraft-web", &["mailcraft-ui-egui", "mailcraft-remote", "egui", "eframe", "rfd"]),
 ];
 const WATCHED: &[&str] = &[
     "mailcraft-core",
@@ -63,7 +66,13 @@ fn ci() -> Result<(), String> {
     cargo(&["fmt", "--all", "--", "--check"])?;
     cargo(&["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])?;
     cargo(&["test", "--workspace"])?;
-    layers()
+    layers()?;
+    wasm()
+}
+
+/// The web app and everything under it build for wasm32 with clippy clean.
+fn wasm() -> Result<(), String> {
+    cargo(&["clippy", "-p", "mailcraft-web", "--target", "wasm32-unknown-unknown", "--", "-D", "warnings"])
 }
 
 fn main() -> ExitCode {
@@ -71,7 +80,8 @@ fn main() -> ExitCode {
     let result = match task.as_str() {
         "ci" => ci(),
         "layers" => layers(),
-        _ => Err("usage: cargo xtask <ci|layers>".to_string()),
+        "wasm" => wasm(),
+        _ => Err("usage: cargo xtask <ci|layers|wasm>".to_string()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

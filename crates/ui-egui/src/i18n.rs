@@ -198,6 +198,13 @@ pub const LABELS: &[&str] = &[
     "Everything stays on this computer: the password is kept in a file only you can read.",
     "Done",
     "Mailbox",
+    "Original attachments included: {names}",
+    "Web app server",
+    "The web app keeps your accounts on a mailcraft-cli server (your computer or your own machine). Start it with `mailcraft-cli serve`, then connect here.",
+    "Server",
+    "Connect",
+    "Connected",
+    "Server unreachable ({url}): {error}. Start it with: mailcraft-cli serve",
 ];
 
 #[cfg(test)]

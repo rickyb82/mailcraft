@@ -33,8 +33,10 @@ code from GPL/AGPL/LGPL projects (Thunderbird, Evolution, KMail, …).
 
 ## Architecture
 - Layers (checked by `cargo xtask layers`): `core` (L0) → `net` (L1) → `engine` (L5) →
-  `ui-egui` / `mcp` (L6) → `apps/*` (L7). Nothing below L6 depends on egui; `engine` depends on
-  `core` only (the transport is injected as a `BackendFactory`); only apps use `rfd`/`eframe`.
+  `ui-egui` / `mcp` / `remote` (L6) → `apps/*` (L7). Nothing below L6 depends on egui; `engine`
+  depends on `core` only (the transport is injected as a `BackendFactory`); only apps use
+  `rfd`/`eframe`. The UI talks to a `MailSession` (the local `Session` or `RemoteSession`), so it
+  must never read `Session`-only state; results of commands arrive through `pump` on the web.
 - **Everything is a command** (`crates/engine/src/cmd.rs`: id, label, menu, shortcut, params,
   network). The UI, the CLI and the MCP server call the same commands; a new user-visible
   feature is a command first, then a tool or button. Network commands return `{"job": id}`;
@@ -45,7 +47,9 @@ code from GPL/AGPL/LGPL projects (Thunderbird, Evolution, KMail, …).
 - Programmatic calls never open dialogs.
 
 ## Working
-- Quality gate before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, layers).
+- Quality gate before every commit: `cargo xtask ci` (fmt, clippy -D warnings, tests, layers,
+  wasm). **Never break wasm**: `apps/mailcraft-web` must build for `wasm32-unknown-unknown`;
+  use `web_time` instead of `std::time::{Instant, SystemTime}` (they panic in the browser).
 - Rust is pinned in `rust-toolchain.toml` so local clippy and CI agree.
 - Interface strings are English in code and translated in `crates/ui-egui/src/i18n/` (add every
   new label to `i18n::LABELS` and the Italian table); engine messages are translated by prefix

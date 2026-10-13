@@ -15,9 +15,12 @@ mod settings;
 pub mod theme;
 mod widgets;
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 pub use i18n::Language;
+pub use mailcraft_engine::MailSession;
 use mailcraft_engine::core::mailbox::Role;
 use mailcraft_engine::core::message::DraftAttachment;
 pub use mailcraft_engine::{self as engine, core};
@@ -55,15 +58,18 @@ pub struct Compose {
     pub draft_uid: Option<u32>,
     /// Replying to (mailbox, uid, everyone).
     pub reply_to: Option<(String, u32, bool)>,
-    /// Forwarding (mailbox, uid).
+    /// Forwarding (mailbox, uid); the original's attachments travel with `mail.forward`.
     pub forward_of: Option<(String, u32)>,
+    /// Names of the original's attachments, shown while forwarding.
+    pub forward_attachments: Vec<String>,
     pub minimized: bool,
     pub focus_body: bool,
 }
 
 /// The whole app state the UI keeps on top of the engine session.
 pub struct MailApp {
-    pub session: Session,
+    /// The local engine session, or a remote one (the web app).
+    pub session: Box<dyn MailSession>,
     pub language: Language,
     pub dark: bool,
     applied_dark: Option<bool>,
@@ -81,10 +87,12 @@ pub struct MailApp {
     reading_full: bool,
     /// Messages of the open conversation that were expanded in the reader.
     expanded: Vec<u32>,
+    /// Settings opened only because no account existed yet: leave it once one appears.
+    auto_settings: bool,
 }
 
 impl MailApp {
-    pub fn new(session: Session) -> Self {
+    pub fn new(session: Box<dyn MailSession>) -> Self {
         let language = match session.config().preferences.language.as_str() {
             "it" => Language::It,
             "en" => Language::En,
@@ -108,22 +116,60 @@ impl MailApp {
             last_sync: None,
             reading_full: false,
             expanded: Vec::new(),
+            auto_settings: screen == Screen::Settings,
         }
     }
 
     /// The demo app: the mock mailbox, Italian or English, no files.
     pub fn demo() -> Self {
-        Self::new(Session::demo())
+        Self::new(Box::new(Session::demo()))
     }
 
-    /// Runs a command; failures go to the status bar.
+    /// Runs a command; failures go to the status bar. A local session answers at once, a remote
+    /// one through [`MailSession::pump`]; both answers reach [`Self::handle_result`].
     pub fn run(&mut self, id: &str, params: Value) -> Option<Value> {
         match self.session.execute(id, &params) {
-            Ok(v) => Some(v),
+            Ok(v) => {
+                if v.get("queued").is_none() && v.get("job").is_none() && v.get("jobs").is_none() {
+                    self.handle_result(id, &v);
+                }
+                Some(v)
+            }
             Err(e) => {
                 self.status = self.language.tr_message(&e.to_string());
                 None
             }
+        }
+    }
+
+    /// Follow-ups that need a command's answer (the settings form, attachment downloads).
+    fn handle_result(&mut self, command: &str, v: &Value) {
+        match command {
+            "account.suggest" => {
+                if let Some(f) = &mut self.settings.editing {
+                    f.apply_suggestion(v);
+                }
+            }
+            "account.add" | "account.update" => {
+                let id = v["id"].as_str().unwrap_or_default().to_string();
+                if !id.is_empty() {
+                    if let Some(f) = &mut self.settings.editing {
+                        f.id = Some(id.clone());
+                        f.password.clear();
+                    }
+                    self.settings.result = self.tr("Saved").to_string();
+                    self.settings.reload = true;
+                    if self.session.has_password(&id) || v["account"]["has_password"] == true {
+                        self.run("account.test", json!({"id": id}));
+                    }
+                }
+            }
+            "mail.attachment" => {
+                if let (Some(name), Some(data)) = (v["name"].as_str(), v["data"].as_str().and_then(core::mime::base64_decode)) {
+                    self.requests.push(Request::SaveAttachment { name: name.to_string(), data });
+                }
+            }
+            _ => {}
         }
     }
 
@@ -151,9 +197,14 @@ impl MailApp {
     /// Applies finished jobs: status messages, toasts.
     fn pump(&mut self) {
         let done: Vec<Completed> = self.session.pump();
+        if self.auto_settings && !self.session.config().accounts.is_empty() && self.settings.editing.is_none() {
+            self.auto_settings = false;
+            self.screen = Screen::Mail;
+        }
         for c in done {
             match c.result {
                 Ok(v) => match c.command.as_str() {
+                    "account.suggest" | "account.add" | "account.update" | "mail.attachment" => self.handle_result(&c.command, &v),
                     "mail.send" | "mail.reply" | "mail.forward" => self.toast(self.tr("Message sent").to_string()),
                     "draft.save" => self.toast(self.tr("Draft saved").to_string()),
                     "account.test" => {
@@ -355,13 +406,8 @@ impl MailApp {
             core::message::join_addresses(&m.envelope.to),
             m.body_text()
         );
-        let attachments = self
-            .session
-            .state(&account)
-            .and_then(|st| st.raw.get(&(mailbox.clone(), uid)))
-            .map(|raw| core::mime::attachments(raw))
-            .unwrap_or_default();
-        self.compose = Some(Compose { subject, body, attachments, forward_of: Some((mailbox, uid)), ..Compose::default() });
+        let forward_attachments = m.attachments.iter().filter(|a| !a.inline).map(|a| a.name.clone()).collect();
+        self.compose = Some(Compose { subject, body, forward_attachments, forward_of: Some((mailbox, uid)), ..Compose::default() });
     }
 
     fn compose_params(&self, c: &Compose) -> Value {
@@ -394,8 +440,17 @@ impl MailApp {
             self.status = self.tr("Add at least one recipient").to_string();
             return;
         }
-        let params = self.compose_params(&c);
-        if self.run("mail.send", params).is_some() {
+        // A forward goes through mail.forward so the original's attachments travel along: the
+        // engine rebuilds the forwarded block, so only the person's note is passed.
+        let ok = if let Some((mailbox, uid)) = c.forward_of.clone() {
+            let header = self.tr("---------- Forwarded message ----------");
+            let note = c.body.split(header).next().unwrap_or_default().trim().to_string();
+            self.run("mail.forward", json!({"uid": uid, "mailbox": mailbox, "to": format!("{}, {}", c.to, c.cc), "body": note})).is_some()
+        } else {
+            let params = self.compose_params(&c);
+            self.run("mail.send", params).is_some()
+        };
+        if ok {
             self.compose = None;
             self.status = self.tr("Sending…").to_string();
         }
@@ -651,7 +706,7 @@ mod tests {
     #[test]
     fn empty_configuration_opens_settings() {
         let ctx = egui::Context::default();
-        let mut app = MailApp::new(Session::new(Box::new(|_| Box::new(core::mock::MockBackend::new())), None));
+        let mut app = MailApp::new(Box::new(Session::new(Box::new(|_| Box::new(core::mock::MockBackend::new())), None)));
         assert_eq!(app.screen, Screen::Settings);
         frame(&mut app, &ctx, vec![]);
         frame(&mut app, &ctx, vec![key(egui::Key::C, egui::Modifiers::NONE), key(egui::Key::E, egui::Modifiers::NONE)]);

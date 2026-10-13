@@ -143,7 +143,17 @@ pub fn status_bar(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
     egui::Panel::bottom("status").frame(frame).show(ui, |ui| {
         ui.horizontal(|ui| {
             let account = app.session.view().account.clone();
-            let error = app.session.state(&account).and_then(|s| s.error.clone());
+            let error = app
+                .session
+                .problem()
+                .filter(|p| p != "connecting")
+                .map(|p| {
+                    app.language.fill(
+                        "Server unreachable ({url}): {error}. Start it with: mailcraft-cli serve",
+                        &[("url", &app.session.server()), ("error", &p)],
+                    )
+                })
+                .or_else(|| app.session.state(&account).and_then(|s| s.error.clone()));
             match error {
                 Some(e) => {
                     let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), Sense::hover());

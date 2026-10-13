@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! mailcraft-cli mcp [--demo]                        # MCP server on stdio, for AI agents
+//! mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open]   # the web app's server
 //! mailcraft-cli accounts                            # configured accounts and their status
 //! mailcraft-cli suggest EMAIL [--lang it]           # IMAP/SMTP settings for an address
 //! mailcraft-cli add EMAIL [--password PW] [--name N] [--imap host:port[:tls|starttls|none]] [--smtp host:port[:sec]] [--no-test]
@@ -20,6 +21,8 @@
 //! built-in demo mailbox instead of real servers.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod serve;
+
 use std::process::ExitCode;
 
 use mailcraft_engine::core::backend::BackendFactory;
@@ -29,6 +32,7 @@ use serde_json::{Value, json};
 
 const USAGE: &str = "Usage:
   mailcraft-cli mcp [--demo]
+  mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open]
   mailcraft-cli accounts
   mailcraft-cli suggest EMAIL [--lang it]
   mailcraft-cli add EMAIL [--password PW] [--name N] [--imap host:port[:sec]] [--smtp host:port[:sec]] [--no-test]
@@ -142,6 +146,22 @@ fn run(raw: &[String]) -> Result<(), String> {
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
             server.serve(stdin.lock(), stdout.lock()).map_err(|e| e.to_string())
+        }
+        Some("serve") => {
+            let tail = rest(1);
+            let static_dir = flag(&tail, "--static").map(std::path::PathBuf::from).or_else(|| {
+                // The web app built with trunk, when it sits next to the sources or the binary.
+                ["dist/web", "../dist/web"].iter().map(std::path::PathBuf::from).find(|p| p.join("index.html").is_file())
+            });
+            serve::run(
+                session(&o),
+                serve::Options {
+                    bind: flag(&tail, "--bind").unwrap_or_else(|| "127.0.0.1:7878".into()),
+                    token: flag(&tail, "--token").filter(|t| t != "true").unwrap_or_default(),
+                    static_dir,
+                    open: flag(&tail, "--open").is_some(),
+                },
+            )
         }
         Some("commands") => {
             for c in COMMANDS {

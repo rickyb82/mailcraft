@@ -9,8 +9,10 @@
 | `crates/engine` (`mailcraft-engine`) | L5 | `Session`: configuration, per-account cache (`store.rs`: mailboxes, envelopes newest first, conversations, opened messages and raw bytes, files on disk), the view (account, mailbox, query, selection, open message), the command table and dispatcher (`cmd.rs`) and the worker thread (`worker.rs`: one backend per account, jobs → events, reply/forward composition). |
 | `crates/ui-egui` (`mailcraft-ui-egui`) | L6 | `MailApp`: top bar, navigation, message list, reading pane, compose card, settings, toasts, keyboard shortcuts, i18n, themes, icons. The `snapshot` example renders it offscreen. |
 | `crates/mcp` (`mailcraft-mcp`) | L6 | The MCP server: tools, prompts and resources over newline-delimited JSON-RPC on stdio, each tool an engine command. |
+| `crates/remote` (`mailcraft-remote`) | L6 | `RemoteSession`: a `MailSession` that mirrors a `mailcraft-cli serve` server over HTTP (`ehttp`, native and wasm): `POST /api/cmd`, `GET /api/snapshot?since=N`. |
 | `apps/mailcraft` | L7 | The desktop app (eframe, rfd for file dialogs). |
-| `apps/mailcraft-cli` | L7 | The CLI and the `mcp` entry point. |
+| `apps/mailcraft-cli` | L7 | The CLI, the `mcp` entry point and `serve` (the web app's server: HTTP API, static files, token). |
+| `apps/mailcraft-web` | L7 | The web app (wasm32, trunk): the same `MailApp` on a `RemoteSession`; file picker and downloads for attachments. |
 | `xtask` | — | `cargo xtask ci`, `cargo xtask layers`. |
 
 ## Commands and jobs
@@ -40,6 +42,18 @@ computed on demand from the envelopes' `References`/`In-Reply-To`/subject.
 id. Both live in `MAILCRAFT_HOME` or the platform configuration directory. `account.add` fills
 the servers from `autoconfig::suggest`; `account.probe` tries the suggested pairs until one
 accepts the login and saves it; `account.test` logs in to IMAP (counting mailboxes) and SMTP.
+
+## Web app
+
+The interface is written against the `MailSession` trait. Locally it is the engine `Session`;
+in the browser it is `RemoteSession`, which sends commands to `mailcraft-cli serve` and polls
+`GET /api/snapshot?since=N` (every 2 s idle, 0.4 s while jobs run). The server answers
+`{"unchanged": true}` until its revision moves; otherwise a `Snapshot`: the configuration
+(never passwords: only which accounts have one), the view, every account's folders with counts,
+the envelopes and the opened messages (as text) of the mailbox in view, and the jobs completed
+since the client's revision, so toasts and form follow-ups (`account.suggest`, `account.add`,
+`mail.attachment`) work the same way as locally. The server keeps one `Session`, pumps it on a
+background thread, and refuses to bind beyond localhost without a token.
 
 ## Interface
 

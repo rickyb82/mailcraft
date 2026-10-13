@@ -155,6 +155,17 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         }
         "Done" => "Fatto",
         "Mailbox" => "Cartella",
+        "Original attachments included: {names}" => "Allegati dell'originale inclusi: {names}",
+        "Web app server" => "Server dell'app web",
+        "The web app keeps your accounts on a mailcraft-cli server (your computer or your own machine). Start it with `mailcraft-cli serve`, then connect here." => {
+            "L'app web tiene gli account su un server mailcraft-cli (il tuo computer o una tua macchina). Avvialo con `mailcraft-cli serve`, poi collegati qui."
+        }
+        "Server" => "Server",
+        "Connect" => "Collegati",
+        "Connected" => "Collegato",
+        "Server unreachable ({url}): {error}. Start it with: mailcraft-cli serve" => {
+            "Server non raggiungibile ({url}): {error}. Avvialo con: mailcraft-cli serve"
+        }
         // Command labels, shown in tooltips.
         "Suggest Settings" => "Suggerisci impostazioni",
         "Add Account" => "Aggiungi account",

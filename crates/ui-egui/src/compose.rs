@@ -103,6 +103,15 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                             }
                             c.focus_body = false;
                         }
+                        if !c.forward_attachments.is_empty() {
+                            ui.label(
+                                RichText::new(
+                                    app.language.fill("Original attachments included: {names}", &[("names", &c.forward_attachments.join(", "))]),
+                                )
+                                .small()
+                                .color(t.muted),
+                            );
+                        }
                         if !c.attachments.is_empty() {
                             ui.horizontal_wrapped(|ui| {
                                 let mut remove = None;

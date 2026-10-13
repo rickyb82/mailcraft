@@ -11,9 +11,11 @@ pub mod cmd;
 pub mod store;
 pub mod worker;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use web_time::Instant;
 
 pub use cmd::{COMMANDS, Command, command};
 pub use mailcraft_core as core;
@@ -21,6 +23,7 @@ use mailcraft_core::account::{Account, Config, Secrets};
 use mailcraft_core::backend::{BackendFactory, FlagChange, Page};
 use mailcraft_core::mailbox::Role;
 use mailcraft_core::message::{Envelope, Message, time};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use store::AccountState;
 use worker::{Event, Job, JobKind, Output, Worker};
@@ -66,7 +69,8 @@ impl Paths {
 }
 
 /// What the interface shows: the account, mailbox, search and selection.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct View {
     pub account: String,
     pub mailbox: String,
@@ -88,6 +92,137 @@ pub struct Completed {
     pub result: Result<Value>,
 }
 
+/// A completed job in a [`Snapshot`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CompletedJson {
+    pub revision: u64,
+    pub job: u64,
+    pub command: String,
+    pub account: String,
+    #[serde(default)]
+    pub result: Value,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+}
+
+impl From<&CompletedJson> for Completed {
+    fn from(c: &CompletedJson) -> Self {
+        Self {
+            job: c.job,
+            command: c.command.clone(),
+            account: c.account.clone(),
+            result: if c.error.is_empty() { Ok(c.result.clone()) } else { Err(Error::Param(c.error.clone())) },
+        }
+    }
+}
+
+/// One account's cache as a snapshot carries it (what the interface needs for the mailbox in
+/// view: folders with counts, that mailbox's envelopes, the opened messages as text).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RemoteState {
+    pub mailboxes: Vec<mailcraft_core::mailbox::Mailbox>,
+    pub delimiter: String,
+    pub last_sync: i64,
+    pub error: Option<String>,
+    pub envelopes: BTreeMap<String, Vec<Envelope>>,
+    pub messages: Vec<(String, u32, Message)>,
+}
+
+impl RemoteState {
+    pub fn into_state(self) -> AccountState {
+        let mut st = AccountState {
+            mailboxes: self.mailboxes,
+            delimiter: self.delimiter,
+            envelopes: self.envelopes,
+            last_sync: self.last_sync,
+            error: self.error,
+            ..AccountState::default()
+        };
+        for (mailbox, uid, m) in self.messages {
+            st.messages.insert((mailbox, uid), m);
+        }
+        st
+    }
+}
+
+/// The session's state for a remote interface (the web app): everything the UI reads, with a
+/// revision so clients fetch it only when it changed. Never contains passwords.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Snapshot {
+    pub revision: u64,
+    pub config: Config,
+    /// Ids of the accounts that have a password.
+    pub passwords: Vec<String>,
+    pub view: View,
+    pub states: BTreeMap<String, RemoteState>,
+    pub jobs_pending: usize,
+    pub notes: Vec<String>,
+    /// Jobs completed after the client's revision.
+    pub completed: Vec<CompletedJson>,
+}
+
+/// What an interface needs from a session: the local [`Session`] implements it directly, a
+/// remote one mirrors a server's snapshots.
+pub trait MailSession {
+    fn config(&self) -> &Config;
+    fn view(&self) -> &View;
+    fn state(&self, account: &str) -> Option<&AccountState>;
+    fn has_password(&self, id: &str) -> bool;
+    fn jobs_pending(&self) -> usize;
+    /// Runs a command. A remote session answers `{"queued": true}` and reports the real result
+    /// through [`MailSession::pump`] as a [`Completed`] with the command's id.
+    fn execute(&mut self, id: &str, params: &Value) -> Result<Value>;
+    fn pump(&mut self) -> Vec<Completed>;
+    fn run_blocking(&mut self, id: &str, params: Value) -> Result<Value>;
+    /// Why the session cannot work right now (a remote server out of reach), if so.
+    fn problem(&self) -> Option<String> {
+        None
+    }
+    /// The server a remote session talks to (empty for a local one).
+    fn server(&self) -> String {
+        String::new()
+    }
+    fn set_server(&mut self, _url: &str) {}
+    fn current(&self) -> Option<&AccountState> {
+        self.state(&self.view().account)
+    }
+    fn account(&self, id: &str) -> Option<&Account> {
+        self.config().account(id)
+    }
+    fn italian(&self) -> bool {
+        self.config().preferences.language == "it"
+    }
+    fn folder_for(&self, account: &str, role: Role) -> Option<String> {
+        folder_for(self.config(), self.state(account), account, role)
+    }
+}
+
+/// The IMAP path of a special folder: configured, detected, or `None`.
+pub fn folder_for(config: &Config, state: Option<&AccountState>, account: &str, role: Role) -> Option<String> {
+    let a = config.account(account)?;
+    let configured = match role {
+        Role::Sent => &a.folders.sent,
+        Role::Drafts => &a.folders.drafts,
+        Role::Trash => &a.folders.trash,
+        Role::Spam => &a.folders.spam,
+        Role::Archive => &a.folders.archive,
+        _ => "",
+    };
+    if !configured.is_empty() {
+        return Some(configured.to_string());
+    }
+    if role == Role::Inbox {
+        return Some("INBOX".into());
+    }
+    let state = state?;
+    state
+        .by_role(role)
+        .map(|m| m.path.clone())
+        .or_else(|| if role == Role::Archive { state.by_role(Role::All).map(|m| m.path.clone()) } else { None })
+}
+
 struct Pending {
     command: String,
     started: Instant,
@@ -105,6 +240,12 @@ pub struct Session {
     worker: Worker,
     next_job: u64,
     pending: BTreeMap<u64, Pending>,
+    /// Bumped on every change, for remote clients.
+    revision: u64,
+    /// Recent completions with the revision they landed at.
+    history: VecDeque<CompletedJson>,
+    /// Completions seen by `wait` that the next `pump` must still report.
+    buffered: Vec<Completed>,
 }
 
 impl Session {
@@ -141,7 +282,65 @@ impl Session {
             view.account = a.id.clone();
             view.mailbox = "INBOX".into();
         }
-        Self { config, secrets, paths, notes, store, view, worker: Worker::start(factory), next_job: 1, pending: BTreeMap::new() }
+        Self {
+            config,
+            secrets,
+            paths,
+            notes,
+            store,
+            view,
+            worker: Worker::start(factory),
+            next_job: 1,
+            pending: BTreeMap::new(),
+            revision: 1,
+            history: VecDeque::new(),
+            buffered: Vec::new(),
+        }
+    }
+
+    /// The state for a remote interface, or `None` when nothing changed since `since`.
+    pub fn snapshot(&self, since: u64) -> Option<Snapshot> {
+        if since == self.revision {
+            return None;
+        }
+        let mut states = BTreeMap::new();
+        for (id, st) in &self.store {
+            let mut rs = RemoteState {
+                mailboxes: st.mailboxes.clone(),
+                delimiter: st.delimiter.clone(),
+                last_sync: st.last_sync,
+                error: st.error.clone(),
+                ..RemoteState::default()
+            };
+            if *id == self.view.account {
+                let mailbox = self.view.mailbox.clone();
+                rs.envelopes.insert(mailbox.clone(), st.list(&mailbox).iter().take(mailcraft_core::limits::MAX_PAGE * 4).cloned().collect());
+                // Only the messages of the mailbox in view, as text (the HTML is reduced here).
+                for ((mb, uid), m) in &st.messages {
+                    if *mb == mailbox && rs.messages.len() < 40 {
+                        let mut m = m.clone();
+                        m.text = m.body_text();
+                        m.html.clear();
+                        rs.messages.push((mb.clone(), *uid, m));
+                    }
+                }
+            }
+            states.insert(id.clone(), rs);
+        }
+        Some(Snapshot {
+            revision: self.revision,
+            config: self.config.clone(),
+            passwords: self.config.accounts.iter().filter(|a| self.secrets.password(&a.id).is_some()).map(|a| a.id.clone()).collect(),
+            view: self.view.clone(),
+            states,
+            jobs_pending: self.pending.len(),
+            notes: self.notes.clone(),
+            completed: self.history.iter().filter(|c| c.revision > since).cloned().collect(),
+        })
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// An in-memory session on the demo mailbox (`MockBackend::demo`), already synced.
@@ -206,6 +405,7 @@ impl Session {
 
     /// Runs a command. Network commands return `{"job": id}` (see [`Self::pump`]).
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
+        self.revision += 1;
         cmd::run(self, id, params)
     }
 
@@ -231,10 +431,16 @@ impl Session {
     pub fn wait(&mut self, id: u64, timeout: Duration) -> Result<Value> {
         let deadline = Instant::now() + timeout;
         loop {
+            let mut found = None;
             for c in self.pump() {
-                if c.job == id {
-                    return c.result;
+                if c.job == id && found.is_none() {
+                    found = Some(c.result);
+                } else {
+                    self.buffered.push(c);
                 }
+            }
+            if let Some(r) = found {
+                return r;
             }
             if !self.pending.contains_key(&id) {
                 return Err(Error::Timeout(id));
@@ -249,6 +455,7 @@ impl Session {
                 if c.job == id {
                     return c.result;
                 }
+                self.buffered.push(c);
             }
         }
     }
@@ -257,7 +464,7 @@ impl Session {
     /// every frame.
     pub fn pump(&mut self) -> Vec<Completed> {
         let events = self.worker.poll();
-        let mut out = Vec::with_capacity(events.len());
+        let mut out = std::mem::take(&mut self.buffered);
         for ev in events {
             out.push(self.apply(ev));
         }
@@ -307,29 +514,11 @@ impl Session {
 
     /// The IMAP path of a special folder for an account: configured, detected, or `None`.
     pub fn folder_for(&self, account: &str, role: Role) -> Option<String> {
-        let a = self.config.account(account)?;
-        let configured = match role {
-            Role::Sent => &a.folders.sent,
-            Role::Drafts => &a.folders.drafts,
-            Role::Trash => &a.folders.trash,
-            Role::Spam => &a.folders.spam,
-            Role::Archive => &a.folders.archive,
-            _ => "",
-        };
-        if !configured.is_empty() {
-            return Some(configured.to_string());
-        }
-        let state = self.store.get(account)?;
-        if role == Role::Inbox {
-            return Some("INBOX".into());
-        }
-        state
-            .by_role(role)
-            .map(|m| m.path.clone())
-            .or_else(|| if role == Role::Archive { state.by_role(Role::All).map(|m| m.path.clone()) } else { None })
+        folder_for(&self.config, self.store.get(account), account, role)
     }
 
     fn apply(&mut self, ev: Event) -> Completed {
+        self.revision += 1;
         let pending = self.pending.remove(&ev.job);
         let command = pending.as_ref().map(|p| p.command.clone()).unwrap_or_default();
         let _ = pending.as_ref().map(|p| p.started);
@@ -354,7 +543,19 @@ impl Session {
                 Err(Error::Core(e))
             }
         };
-        Completed { job: ev.job, command, account, result }
+        let done = Completed { job: ev.job, command, account, result };
+        self.history.push_back(CompletedJson {
+            revision: self.revision,
+            job: done.job,
+            command: done.command.clone(),
+            account: done.account.clone(),
+            result: done.result.clone().unwrap_or(Value::Null),
+            error: done.result.as_ref().err().map(ToString::to_string).unwrap_or_default(),
+        });
+        while self.history.len() > 200 {
+            self.history.pop_front();
+        }
+        done
     }
 
     fn apply_output(&mut self, account: &str, command: &str, kind: JobKind, out: Output) -> Result<Value> {
@@ -479,6 +680,33 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.save_caches();
+    }
+}
+
+impl MailSession for Session {
+    fn config(&self) -> &Config {
+        &self.config
+    }
+    fn view(&self) -> &View {
+        &self.view
+    }
+    fn state(&self, account: &str) -> Option<&AccountState> {
+        self.store.get(account)
+    }
+    fn has_password(&self, id: &str) -> bool {
+        Session::has_password(self, id)
+    }
+    fn jobs_pending(&self) -> usize {
+        self.pending.len()
+    }
+    fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
+        Session::execute(self, id, params)
+    }
+    fn pump(&mut self) -> Vec<Completed> {
+        Session::pump(self)
+    }
+    fn run_blocking(&mut self, id: &str, params: Value) -> Result<Value> {
+        Session::run_blocking(self, id, params)
     }
 }
 
