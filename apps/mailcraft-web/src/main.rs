@@ -22,11 +22,48 @@ mod web {
 
     /// Files picked asynchronously, waiting to be attached on the next frame.
     type Inbox = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+    /// Assistant answers waiting for the next frame.
+    type Answers = Arc<Mutex<Vec<(u64, Result<Value, String>)>>>;
 
     pub struct App {
         app: MailApp,
         inbox: Inbox,
+        answers: Answers,
         token: String,
+    }
+
+    /// `POST`s to the framework's assistant with the session cookie (same origin).
+    fn assist(answers: &Answers, ctx: &egui::Context, token: u64, url: &str, body: &Value) {
+        let url = if url.starts_with("http://") || url.starts_with("https://") {
+            url.to_string()
+        } else {
+            let origin = web_sys::window().and_then(|w| w.location().origin().ok()).unwrap_or_default();
+            format!("{origin}/{}", url.trim_start_matches('/'))
+        };
+        let mut req = ehttp::Request::post(url, body.to_string().into_bytes());
+        req.headers = ehttp::Headers::new(&[("Accept", "application/json"), ("Content-Type", "application/json"), ("X-Requested-With", "FamilAI")]);
+        req.credentials = ehttp::Credentials::Include;
+        let answers = answers.clone();
+        let ctx = ctx.clone();
+        ehttp::fetch(req, move |result| {
+            let out = match result {
+                Ok(r) => match serde_json::from_slice::<Value>(&r.bytes) {
+                    Ok(v) if r.ok => Ok(v),
+                    Ok(v) => Err(v
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .or_else(|| v.get("message").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("assistant: HTTP {}", r.status))),
+                    Err(_) => Err(format!("assistant: HTTP {} {}", r.status, r.status_text)),
+                },
+                Err(e) => Err(format!("assistant: {e}")),
+            };
+            if let Ok(mut q) = answers.lock() {
+                q.push((token, out));
+            }
+            ctx.request_repaint();
+        });
     }
 
     fn query_param(name: &str) -> Option<String> {
@@ -89,7 +126,7 @@ mod web {
                 app.language = l;
             }
             app.dark = saved.as_ref().and_then(|v| v.get("dark")?.as_bool()).unwrap_or_else(|| cc.egui_ctx.system_theme() == Some(egui::Theme::Dark));
-            Self { app, inbox: Arc::default(), token }
+            Self { app, inbox: Arc::default(), answers: Arc::default(), token }
         }
 
         fn serve_requests(&mut self, ctx: &egui::Context) {
@@ -117,6 +154,7 @@ mod web {
                             let _ = w.open_with_url_and_target(&url, "_blank");
                         }
                     }
+                    Request::Assist { token, url, body } => assist(&self.answers, ctx, token, &url, &body),
                     Request::Print { html, .. } => {
                         // A page that prints itself, opened in a new tab.
                         let parts = js_sys::Array::new();
@@ -137,6 +175,10 @@ mod web {
 
     impl eframe::App for App {
         fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+            let answers: Vec<(u64, Result<Value, String>)> = self.answers.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
+            for (token, result) in answers {
+                self.app.assist_answer(token, result);
+            }
             let files: Vec<(String, Vec<u8>)> = self.inbox.lock().map(|mut q| std::mem::take(&mut *q)).unwrap_or_default();
             if !files.is_empty()
                 && let Some(c) = &mut self.app.compose

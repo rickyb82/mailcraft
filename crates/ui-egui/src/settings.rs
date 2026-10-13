@@ -740,6 +740,12 @@ fn preferences_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
             ("reading_pane", "Reading pane beside the list", prefs.reading_pane),
             ("conversations", "Group messages into conversations", prefs.conversations),
             ("mark_read_on_open", "Mark messages read when opened", prefs.mark_read_on_open),
+            ("assist_suggestions", "Reply suggestions from the assistant under each message", prefs.assist_suggestions),
+            (
+                "assist_cloud",
+                "Let the assistant use cloud models too (otherwise local models only: your mail never leaves the network)",
+                prefs.assist_cloud,
+            ),
         ] {
             let mut v = value;
             if ui.checkbox(&mut v, app.tr(label)).changed() {

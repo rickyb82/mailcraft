@@ -32,6 +32,7 @@ pub struct RemoteSession {
     config: Config,
     passwords: Vec<String>,
     oauth_ready: Vec<String>,
+    assist_url: String,
     view: View,
     states: BTreeMap<String, AccountState>,
     revision: u64,
@@ -67,6 +68,7 @@ impl RemoteSession {
             config: Config::default(),
             passwords: Vec::new(),
             oauth_ready: Vec::new(),
+            assist_url: String::new(),
             view: View::default(),
             states: BTreeMap::new(),
             revision: 0,
@@ -141,6 +143,7 @@ impl RemoteSession {
         self.config = s.config;
         self.passwords = s.passwords;
         self.oauth_ready = s.oauth_ready;
+        self.assist_url = s.assist_url;
         self.view = s.view;
         self.states = s.states.into_iter().map(|(k, v)| (k, v.into_state())).collect();
         self.jobs_pending = s.jobs_pending;
@@ -167,6 +170,10 @@ impl MailSession for RemoteSession {
 
     fn oauth_ready(&self) -> Vec<String> {
         self.oauth_ready.clone()
+    }
+
+    fn assist_url(&self) -> String {
+        self.assist_url.clone()
     }
 
     fn jobs_pending(&self) -> usize {

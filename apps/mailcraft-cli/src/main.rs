@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! mailcraft-cli mcp [--demo]                        # MCP server on stdio, for AI agents
-//! mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open] [--users-dir DIR] [--public-url URL]   # the web app's server
+//! mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open] [--users-dir DIR] [--public-url URL] [--assist-url URL]   # the web app's server
 //! mailcraft-cli mcp --server URL --token T                # MCP for one user of a multi-user server
 //! mailcraft-cli accounts                            # configured accounts and their status
 //! mailcraft-cli suggest EMAIL [--lang it]           # IMAP/SMTP settings for an address
@@ -35,7 +35,7 @@ use serde_json::{Value, json};
 
 const USAGE: &str = "Usage:
   mailcraft-cli mcp [--demo]
-  mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open] [--users-dir DIR] [--public-url URL]
+  mailcraft-cli serve [--bind 127.0.0.1:7878] [--static DIR] [--token SECRET] [--open] [--users-dir DIR] [--public-url URL] [--assist-url URL]
   mailcraft-cli mcp --server URL --token USER_TOKEN
   mailcraft-cli accounts
   mailcraft-cli suggest EMAIL [--lang it]
@@ -189,6 +189,7 @@ fn run(raw: &[String]) -> Result<(), String> {
                     demo: o.demo,
                     lang: o.lang.clone(),
                     public_url: flag(&tail, "--public-url").or_else(|| std::env::var("MAILCRAFT_PUBLIC_URL").ok()).filter(|u| !u.trim().is_empty()),
+                    assist_url: flag(&tail, "--assist-url").or_else(|| std::env::var("MAILCRAFT_ASSIST_URL").ok()).filter(|u| !u.trim().is_empty()),
                 },
             )
         }

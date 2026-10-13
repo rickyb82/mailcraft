@@ -47,6 +47,31 @@ pub enum Request {
     OpenUrl(String),
     /// Print a page (a self-contained HTML document that prints itself when opened).
     Print { title: String, html: String },
+    /// Ask the framework's assistant (`POST` the JSON body to the assist URL, same origin,
+    /// header `X-Requested-With: FamilAI`); the host answers with [`MailApp::assist_answer`].
+    Assist { token: u64, url: String, body: Value },
+}
+
+/// What an assistant answer is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AssistJob {
+    /// Reply suggestions for a message (account, mailbox, uid).
+    Suggest(String, String, u32),
+    /// A draft for the compose window.
+    Draft,
+}
+
+/// Reply suggestions and drafts from the framework's assistant.
+#[derive(Default)]
+pub struct AssistState {
+    /// Suggestions by (account, mailbox, uid); an empty list while loading or when none came.
+    pub suggestions: std::collections::HashMap<(String, String, u32), Vec<String>>,
+    pending: std::collections::HashMap<u64, AssistJob>,
+    next_token: u64,
+    /// What the person wants the draft to say.
+    pub instruction: String,
+    pub busy: bool,
+    pub error: String,
 }
 
 /// The message being written.
@@ -72,6 +97,8 @@ pub struct Compose {
     pub from_account: String,
     /// Where the person dragged the window (from its bottom-right home).
     pub offset: egui::Vec2,
+    /// The quoted original of a reply (kept apart so a drafted text can replace the note).
+    pub quote: String,
     /// The next picked files are images to show inline; attachments before this index are files.
     pub inline_from: Option<usize>,
 }
@@ -102,6 +129,7 @@ pub struct MailApp {
     /// Recipient completion: the prefix asked for and the matches (display, address).
     pub contact_query: String,
     pub contact_hits: Vec<(String, String)>,
+    pub assist: AssistState,
 }
 
 impl MailApp {
@@ -132,6 +160,7 @@ impl MailApp {
             auto_settings: screen == Screen::Settings,
             contact_query: String::new(),
             contact_hits: Vec::new(),
+            assist: AssistState::default(),
         }
     }
 
@@ -362,6 +391,13 @@ impl MailApp {
         }
     }
 
+    /// Asks for suggestions once the open message is loaded (called every frame, cheap).
+    fn assist_tick(&mut self) {
+        if self.session.view().open.is_some() {
+            self.assist_suggest_open();
+        }
+    }
+
     /// Starts a sync of the current account when it is time (or `force`).
     pub fn sync(&mut self, force: bool) {
         let minutes = self.session.config().preferences.sync_minutes;
@@ -572,11 +608,113 @@ impl MailApp {
             show_cc: !cc.is_empty(),
             subject,
             body: format!("\n{quote}"),
+            quote,
             reply_to: Some((mailbox, uid, all)),
             focus_body: true,
             from_account: account,
             ..Compose::default()
         });
+    }
+
+    /// Opens a reply that starts with a suggested sentence.
+    pub fn reply_with(&mut self, text: &str) {
+        self.compose_reply(false);
+        if let Some(c) = &mut self.compose {
+            c.body = format!("{text}\n{}", c.quote);
+            c.focus_body = false;
+        }
+    }
+
+    /// The assistant is available: the server announced its endpoint.
+    pub fn assist_available(&self) -> bool {
+        !self.session.assist_url().is_empty()
+    }
+
+    /// Asks the assistant something; the host performs the request.
+    fn assist_request(&mut self, job: AssistJob, mut body: Value) {
+        let url = self.session.assist_url();
+        if url.is_empty() {
+            return;
+        }
+        body["local_only"] = json!(!self.session.config().preferences.assist_cloud);
+        body["language"] = json!(self.language.code());
+        self.assist.next_token += 1;
+        let token = self.assist.next_token;
+        self.assist.pending.insert(token, job);
+        self.assist.busy = true;
+        self.requests.push(Request::Assist { token, url, body });
+    }
+
+    /// Asks for reply suggestions of the open message, once per message.
+    fn assist_suggest_open(&mut self) {
+        if !self.assist_available() || !self.session.config().preferences.assist_suggestions {
+            return;
+        }
+        let Some((mailbox, uid)) = self.session.view().open.clone() else { return };
+        let account = self.open_account();
+        let key = (account.clone(), mailbox.clone(), uid);
+        if self.assist.suggestions.contains_key(&key) {
+            return;
+        }
+        let Some(m) = self.open_state().and_then(|st| st.message(&mailbox, uid)) else { return };
+        let body = json!({
+            "kind": "suggest",
+            "subject": m.envelope.subject,
+            "sender": core::message::join_addresses(&m.envelope.from),
+            "text": core::clip(&m.body_text(), 12_000),
+        });
+        self.assist.suggestions.insert(key.clone(), Vec::new());
+        self.assist_request(AssistJob::Suggest(account, mailbox, uid), body);
+    }
+
+    /// Asks the assistant to write the reply being composed from the instruction typed.
+    pub fn assist_draft(&mut self) {
+        let Some(c) = self.compose.clone() else { return };
+        let instruction = self.assist.instruction.trim().to_string();
+        let original =
+            c.reply_to.clone().and_then(|(mailbox, uid, _)| self.session.state(&c.from_account).and_then(|st| st.message(&mailbox, uid)).cloned());
+        let body = json!({
+            "kind": "draft",
+            "subject": c.subject,
+            "sender": original.as_ref().map(|m| core::message::join_addresses(&m.envelope.from)).unwrap_or_default(),
+            "text": original.as_ref().map(|m| core::clip(&m.body_text(), 12_000).to_string()).unwrap_or_default(),
+            "to": c.to,
+            "instruction": instruction,
+            "tone": "professionale",
+        });
+        self.assist_request(AssistJob::Draft, body);
+    }
+
+    /// The host's answer to a [`Request::Assist`]: suggestions go under the message, a draft
+    /// into the compose window.
+    pub fn assist_answer(&mut self, token: u64, result: Result<Value, String>) {
+        let Some(job) = self.assist.pending.remove(&token) else { return };
+        self.assist.busy = !self.assist.pending.is_empty();
+        match (job, result) {
+            (AssistJob::Suggest(a, m, uid), Ok(v)) => {
+                let list: Vec<String> = v["suggestions"]
+                    .as_array()
+                    .map(|l| l.iter().filter_map(Value::as_str).map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).take(5).collect())
+                    .unwrap_or_default();
+                self.assist.suggestions.insert((a, m, uid), list);
+                self.assist.error.clear();
+            }
+            (AssistJob::Draft, Ok(v)) => {
+                if let (Some(draft), Some(c)) = (v["draft"].as_str(), &mut self.compose) {
+                    c.body = if c.quote.is_empty() { draft.trim_end().to_string() } else { format!("{}\n{}", draft.trim_end(), c.quote) };
+                }
+                self.assist.error.clear();
+            }
+            (AssistJob::Suggest(a, m, uid), Err(e)) => {
+                self.assist.suggestions.remove(&(a, m, uid));
+                self.assist.error = e.clone();
+                self.status = e;
+            }
+            (AssistJob::Draft, Err(e)) => {
+                self.assist.error = e.clone();
+                self.status = e;
+            }
+        }
     }
 
     pub fn compose_forward(&mut self) {
@@ -820,6 +958,7 @@ impl MailApp {
         }
         self.pump();
         self.sync(false);
+        self.assist_tick();
         if self.session.jobs_pending() > 0 {
             ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
@@ -930,6 +1069,24 @@ mod tests {
         frame(&mut app, &ctx, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
         assert!(app.compose.as_ref().is_some_and(|c| c.minimized));
         app.compose = None;
+        // The assistant: suggestions under the open message become a reply; a draft fills the body.
+        assert!(!app.assist_available());
+        app.open(list::visible_uids(&app)[0]);
+        settle(&mut app, &ctx);
+        let (mailbox, uid) = app.session.view().open.clone().unwrap();
+        let hit = (app.open_account(), mailbox.clone(), uid);
+        app.assist.suggestions.insert(hit.clone(), vec!["Confermo, a giovedì".into()]);
+        app.reply_with("Confermo, a giovedì");
+        assert!(app.compose.as_ref().is_some_and(|c| c.body.starts_with("Confermo, a giovedì\n") && c.body.contains("ha scritto:")));
+        app.assist.instruction = "conferma e chiedi le planimetrie".into();
+        app.assist.pending.insert(7, AssistJob::Draft);
+        app.assist_answer(7, Ok(json!({"draft": "Ciao Luca,\nconfermo giovedì. Mi mandi le planimetrie?"})));
+        assert!(app.compose.as_ref().is_some_and(|c| c.body.starts_with("Ciao Luca,\nconfermo giovedì.") && c.body.contains("ha scritto:")));
+        app.assist.pending.insert(8, AssistJob::Suggest(hit.0.clone(), hit.1.clone(), hit.2));
+        app.assist_answer(8, Err("503: no local model".into()));
+        assert!(!app.assist.suggestions.contains_key(&hit) && app.status.contains("503"));
+        app.compose = None;
+        app.close_reader();
         app.search = "fattura".into();
         app.run("mail.search", json!({"query": "fattura"}));
         settle(&mut app, &ctx);

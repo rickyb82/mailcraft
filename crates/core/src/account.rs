@@ -280,6 +280,12 @@ pub struct Preferences {
     pub undo_send_seconds: u32,
     /// The account opened at start; empty = the first.
     pub default_account: String,
+    /// Ask the assistant (the framework's `assist` API) for reply suggestions when a message
+    /// is opened.
+    pub assist_suggestions: bool,
+    /// Let the assistant use cloud models too (otherwise local models only: the mail never
+    /// leaves the network).
+    pub assist_cloud: bool,
 }
 
 impl Default for Preferences {
@@ -292,6 +298,8 @@ impl Default for Preferences {
             reading_pane: true,
             conversations: true,
             mark_read_on_open: true,
+            assist_suggestions: true,
+            assist_cloud: false,
             undo_send_seconds: 5,
             default_account: String::new(),
         }
@@ -333,6 +341,8 @@ impl Preferences {
             "conversations" | "threads" | "threading" => self.conversations = bool_of(v)?,
             "mark_read_on_open" | "mark_read" => self.mark_read_on_open = bool_of(v)?,
             "undo_send_seconds" | "undo_send" => self.undo_send_seconds = num(v, 30)?,
+            "assist_suggestions" | "suggestions" | "suggerimenti" => self.assist_suggestions = bool_of(v)?,
+            "assist_cloud" | "allow_cloud" | "cloud" => self.assist_cloud = bool_of(v)?,
             "default_account" => self.default_account = slug(v),
             other => return Err(Error::Config(format!("unknown preference `{other}`"))),
         }
@@ -351,6 +361,8 @@ impl Preferences {
             ("mark_read_on_open", self.mark_read_on_open.to_string()),
             ("undo_send_seconds", self.undo_send_seconds.to_string()),
             ("default_account", self.default_account.clone()),
+            ("assist_suggestions", self.assist_suggestions.to_string()),
+            ("assist_cloud", self.assist_cloud.to_string()),
         ]
     }
 }

@@ -192,6 +192,9 @@ pub struct Snapshot {
     /// OAuth providers with a configured client (`google`, `microsoft`): sign-in is possible.
     #[serde(default)]
     pub oauth_ready: Vec<String>,
+    /// The framework's assistant endpoint (reply suggestions, drafts), when the server has one.
+    #[serde(default)]
+    pub assist_url: String,
 }
 
 /// What an interface needs from a session: the local [`Session`] implements it directly, a
@@ -219,6 +222,10 @@ pub trait MailSession {
     /// OAuth providers whose client is configured (sign-in with them works).
     fn oauth_ready(&self) -> Vec<String> {
         Vec::new()
+    }
+    /// The assistant endpoint the interface may call for suggestions (empty = none).
+    fn assist_url(&self) -> String {
+        String::new()
     }
     fn current(&self) -> Option<&AccountState> {
         self.state(&self.view().account)
@@ -314,6 +321,8 @@ pub struct Session {
     /// The loopback listener's callbacks (desktop sign-in).
     callbacks: (Sender<loopback::Callback>, Receiver<loopback::Callback>),
     loopback: Option<loopback::Loopback>,
+    /// The assistant endpoint announced to interfaces (set by the server).
+    assist_url: String,
 }
 
 impl Session {
@@ -373,7 +382,19 @@ impl Session {
             refreshing: BTreeSet::new(),
             callbacks: std::sync::mpsc::channel(),
             loopback: None,
+            assist_url: std::env::var("MAILCRAFT_ASSIST_URL").unwrap_or_default().trim().to_string(),
         }
+    }
+
+    /// Announces the framework's assistant endpoint to interfaces (the web app calls it for
+    /// reply suggestions and drafts).
+    pub fn set_assist_url(&mut self, url: &str) {
+        self.assist_url = url.trim().to_string();
+        self.revision += 1;
+    }
+
+    pub fn assist_url(&self) -> String {
+        self.assist_url.clone()
     }
 
     /// The redirect URL of the loopback listener for a sign-in on this machine (started when
@@ -436,6 +457,7 @@ impl Session {
             config: self.config.clone(),
             passwords: self.config.accounts.iter().filter(|a| self.secrets.has_credential(a)).map(|a| a.id.clone()).collect(),
             oauth_ready: self.oauth_ready(),
+            assist_url: self.assist_url.clone(),
             view: self.view.clone(),
             states,
             jobs_pending: self.pending.len(),
@@ -904,6 +926,9 @@ impl MailSession for Session {
     }
     fn oauth_ready(&self) -> Vec<String> {
         Session::oauth_ready(self)
+    }
+    fn assist_url(&self) -> String {
+        Session::assist_url(self)
     }
     fn jobs_pending(&self) -> usize {
         self.pending.len()

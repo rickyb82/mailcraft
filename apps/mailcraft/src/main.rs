@@ -45,6 +45,10 @@ impl App {
                         open_with_system(&url);
                     }
                 }
+                Request::Assist { token, .. } => {
+                    // The assistant lives in the framework behind the web app: not on the desktop.
+                    self.0.assist_answer(token, Err(self.0.tr("The assistant is available in the web app only").to_string()));
+                }
                 Request::Print { title, html } => {
                     // A page that prints itself, opened in the browser.
                     let name = format!("mailcraft-print-{}.html", mailcraft_ui_egui::core::message::time::now());

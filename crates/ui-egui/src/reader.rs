@@ -101,8 +101,46 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 message_card(app, ui, t, &account, &mailbox, e, italian, list.len() == 1);
                 ui.add_space(8.0);
             }
+            suggestion_chips(app, ui, t, &account, &mailbox, uid);
         });
     });
+}
+
+/// The assistant's reply suggestions under the message, like Gmail's smart replies: a click
+/// opens the reply with that sentence.
+fn suggestion_chips(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, account: &str, mailbox: &str, uid: u32) {
+    if !app.assist_available() || !app.session.config().preferences.assist_suggestions {
+        return;
+    }
+    let key = (account.to_string(), mailbox.to_string(), uid);
+    let Some(list) = app.assist.suggestions.get(&key).cloned() else { return };
+    if list.is_empty() {
+        if app.assist.busy {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(12.0).color(t.muted));
+                ui.label(RichText::new(app.tr("Suggested replies…")).small().color(t.muted));
+            });
+        }
+        return;
+    }
+    let mut chosen: Option<String> = None;
+    ui.horizontal_wrapped(|ui| {
+        for s in &list {
+            let (rect, resp) = ui.allocate_exact_size(
+                vec2(ui.painter().layout_no_wrap(s.clone(), FontId::proportional(13.0), t.ui_text).size().x + 28.0, 32.0),
+                Sense::click(),
+            );
+            ui.painter().rect_filled(rect, 16.0, if resp.hovered() { t.hover } else { t.panel });
+            ui.painter().rect_stroke(rect, 16.0, Stroke::new(1.0, t.border), StrokeKind::Inside);
+            ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, s, FontId::proportional(13.0), t.ui_text);
+            if resp.on_hover_text(app.tr("Reply with this")).clicked() {
+                chosen = Some(s.clone());
+            }
+        }
+    });
+    if let Some(s) = chosen {
+        app.reply_with(&s);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

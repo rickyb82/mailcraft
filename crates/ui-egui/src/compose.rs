@@ -258,6 +258,23 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                         }
                         c.focus_body = false;
                     }
+                    if app.assist_available() {
+                        // "Write with the assistant": what to say, in plain words.
+                        let hint_say = app.tr("What do you want to say?").to_string();
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("✨").size(14.0));
+                            let w = ui.available_width() - 200.0;
+                            ui.add(egui::TextEdit::singleline(&mut app.assist.instruction).hint_text(hint_say.clone()).desired_width(w));
+                            let ready = !app.assist.instruction.trim().is_empty() && !app.assist.busy;
+                            if ui.add_enabled(ready, egui::Button::new(app.tr("Write with the assistant"))).clicked() {
+                                app.compose = Some(c.clone());
+                                app.assist_draft();
+                            }
+                            if app.assist.busy {
+                                ui.add(egui::Spinner::new().size(14.0).color(t.accent));
+                            }
+                        });
+                    }
                     if !c.forward_attachments.is_empty() {
                         ui.label(
                             RichText::new(

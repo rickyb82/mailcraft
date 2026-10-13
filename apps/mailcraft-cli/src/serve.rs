@@ -30,6 +30,9 @@ pub struct Options {
     /// The URL browsers reach this server at (behind a proxy), for the OAuth callback; when
     /// unset it comes from the request's `X-Forwarded-*` or `Host` headers.
     pub public_url: Option<String>,
+    /// The framework's assistant endpoint (`/api/mail/assist`) announced to the web app for
+    /// reply suggestions and drafts; relative URLs are resolved against the page's origin.
+    pub assist_url: Option<String>,
 }
 
 type Shared = Arc<Mutex<Session>>;
@@ -73,6 +76,10 @@ impl Hub {
             }
             s
         };
+        let mut session = session;
+        if let Some(u) = &self.opts.assist_url {
+            session.set_assist_url(u);
+        }
         let shared = Arc::new(Mutex::new(session));
         map.insert(user, shared.clone());
         Ok(shared)
@@ -492,6 +499,10 @@ pub fn run(session: Session, opts: Options) -> Result<(), String> {
     if let Some(d) = &opts.users_dir {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
+    let mut session = session;
+    if let Some(u) = &opts.assist_url {
+        session.set_assist_url(u);
+    }
     let single = opts.users_dir.is_none().then(|| Arc::new(Mutex::new(session)));
     let hub = Arc::new(Hub { opts, single, sessions: Mutex::new(HashMap::new()), tokens: Mutex::new(HashMap::new()) });
     hub.load_tokens();
@@ -580,7 +591,17 @@ mod tests {
         std::thread::spawn(move || {
             let _ = run(
                 Session::demo(),
-                Options { bind: a, token: "t0k".into(), static_dir: None, open: false, users_dir: None, demo: false, lang: None, public_url: None },
+                Options {
+                    bind: a,
+                    token: "t0k".into(),
+                    static_dir: None,
+                    open: false,
+                    users_dir: None,
+                    demo: false,
+                    lang: None,
+                    public_url: None,
+                    assist_url: None,
+                },
             );
         });
         for _ in 0..50 {
@@ -681,7 +702,17 @@ mod remote_tests {
         std::thread::spawn(move || {
             let _ = run(
                 Session::demo(),
-                Options { bind: a, token: String::new(), static_dir: None, open: false, users_dir: None, demo: false, lang: None, public_url: None },
+                Options {
+                    bind: a,
+                    token: String::new(),
+                    static_dir: None,
+                    open: false,
+                    users_dir: None,
+                    demo: false,
+                    lang: None,
+                    public_url: None,
+                    assist_url: None,
+                },
             );
         });
         for _ in 0..50 {
@@ -757,6 +788,7 @@ mod multi_user_tests {
                     demo: true,
                     lang: Some("it".into()),
                     public_url: None,
+                    assist_url: Some("/api/mail/assist".into()),
                 },
             );
         });
@@ -780,6 +812,7 @@ mod multi_user_tests {
         );
         assert!(st.contains("200"), "{v}");
         let (_, anna) = call(&addr, "GET", "/api/snapshot?since=0", "Authorization: Bearer svc\r\nX-Mailcraft-User: Anna Rossi\r\n", "");
+        assert_eq!(anna["assist_url"], "/api/mail/assist", "the assistant endpoint reaches the web app: {anna}");
         assert_eq!(anna["config"]["preferences"]["theme"], "dark");
         let (_, luca) = call(&addr, "GET", "/api/snapshot?since=0&user=luca", "Authorization: Bearer svc\r\n", "");
         assert_eq!(luca["config"]["preferences"]["theme"], "system", "another user, another session");

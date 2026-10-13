@@ -88,6 +88,24 @@ the user's state (folders, the mailbox in view, opened messages, finished jobs) 
 `{"unchanged": true}` otherwise. `GET /api/health` needs no token. Every command is listed by
 `mailcraft-cli commands` and in `crates/engine/src/cmd.rs`.
 
+## Reply suggestions and drafts from your assistant
+
+Start the server with `--assist-url /api/mail/assist` (or `MAILCRAFT_ASSIST_URL`): the web
+app then `POST`s to that address on its own origin, with the page's session cookie and the
+header `X-Requested-With: FamilAI`, and shows the answers in the mailbox:
+
+- when a message is opened, `{"kind": "suggest", "subject", "sender", "text", "local_only",
+  "language"}` → `{"suggestions": ["…", "…", "…"]}` becomes up to five chips under the message;
+  a click opens the reply with that sentence;
+- in the compose window, *Write with the assistant* sends `{"kind": "draft", "subject",
+  "sender", "text", "to", "instruction", "tone", "local_only", "language"}` → `{"draft": "…"}`
+  replaces the note above the quote.
+
+`local_only` follows the preference *Let the assistant use cloud models too* (off by default,
+so the mail never leaves the network); the preference *Reply suggestions* turns the chips off.
+An error answer (`{"error": "…"}` or a non-2xx status) is shown in the status bar. The desktop
+app and the CLI have no assistant (the chips do not appear there).
+
 ## Gmail and Microsoft 365 (OAuth)
 
 The providers accept a redirect URI only on **HTTPS with a host name** (or on `localhost`,

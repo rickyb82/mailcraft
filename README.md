@@ -38,6 +38,10 @@ triage and answer your mail. Part of the *craft* family (`gridcraft`, `ideacraft
   (`MAILCRAFT_BUILTIN_GOOGLE_CLIENT_ID` at build time), so users just press *Sign in with
   Google*; otherwise the client is pasted in Settings, `mailcraft-cli oauth`, or environment
   variables. App passwords still work. See [`docs/oauth.md`](docs/oauth.md).
+- **Smart replies from your own assistant** — behind a framework with an `assist` endpoint
+  (`--assist-url`), the web app shows up to five suggested replies under each message and a
+  *Write with the assistant* box in the compose window; local models only unless you allow the
+  cloud.
 - **Write like on Gmail** — a formatting bar (bold, italic, underline, lists, links, inline
   images) on a light markup that goes out as text + HTML; a print button for any message or
   draft; the compose window drags anywhere so what is behind it stays readable.

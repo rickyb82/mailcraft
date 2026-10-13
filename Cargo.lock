@@ -2047,6 +2047,7 @@ version = "0.1.0"
 dependencies = [
  "eframe",
  "egui",
+ "ehttp",
  "js-sys",
  "mailcraft-remote",
  "mailcraft-ui-egui",

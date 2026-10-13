@@ -113,6 +113,7 @@ fn tools() -> Value {
             "language": {"type": "string", "enum": ["en", "it", "system"]}, "theme": {"type": "string", "enum": ["light", "dark", "system"]},
             "sync_minutes": {"type": "integer", "minimum": 0, "maximum": 1440}, "page_size": {"type": "integer", "minimum": 5, "maximum": 500},
             "reading_pane": {"type": "boolean"}, "conversations": {"type": "boolean"}, "mark_read_on_open": {"type": "boolean"},
+            "assist_suggestions": {"type": "boolean", "description": "Reply suggestions from the framework's assistant under each message"}, "assist_cloud": {"type": "boolean", "description": "Let the assistant use cloud models (default false: local only)"},
             "undo_send_seconds": {"type": "integer", "minimum": 0, "maximum": 30}, "default_account": account}}},
         {"name": "sync", "description": "Refresh the folders and the first page of a mailbox from the server.",
          "inputSchema": {"type": "object", "properties": {"account": account, "mailbox": mailbox, "all": {"type": "boolean", "description": "Every account"}}}},

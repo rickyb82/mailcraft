@@ -126,6 +126,15 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Discard" => "Elimina",
         "Attach files" => "Allega file",
         "Print" => "Stampa",
+        "Suggested replies…" => "Risposte suggerite…",
+        "The assistant is available in the web app only" => "L'assistente è disponibile solo nell'app web",
+        "Reply with this" => "Rispondi con questa",
+        "What do you want to say?" => "Cosa vuoi dire?",
+        "Write with the assistant" => "Scrivi con l'assistente",
+        "Reply suggestions from the assistant under each message" => "Suggerimenti di risposta dell'assistente sotto ogni messaggio",
+        "Let the assistant use cloud models too (otherwise local models only: your mail never leaves the network)" => {
+            "Permetti all'assistente anche i modelli cloud (altrimenti solo modelli locali: la posta non esce dalla rete)"
+        }
         "Bold" => "Grassetto",
         "Italic" => "Corsivo",
         "Underline" => "Sottolineato",

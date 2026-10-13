@@ -36,7 +36,7 @@ try the tools. `--home DIR` uses another configuration directory.
 | `test_account` | Log in to IMAP and SMTP |
 | `find_servers` | Try the suggested server pairs until one accepts the login; save it |
 | `set_password` | Store or replace a password |
-| `get_preferences` / `set_preferences` | language, theme, sync_minutes, page_size, reading_pane, conversations, mark_read_on_open, undo_send_seconds, default_account |
+| `get_preferences` / `set_preferences` | language, theme, sync_minutes, page_size, reading_pane, conversations, mark_read_on_open, undo_send_seconds, default_account, assist_suggestions, assist_cloud |
 
 ### Sign-in with Google / Microsoft 365
 
