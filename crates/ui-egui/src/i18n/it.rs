@@ -50,7 +50,9 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Signed in with {provider}" => "Accesso con {provider} attivo",
         "Sign in again" => "Accedi di nuovo",
         "Create the {provider} client first (fields below)" => "Crea prima il client {provider} (campi qui sotto)",
-        "Complete the sign-in in the browser, then come back here" => "Completa l'accesso nel browser, poi torna qui",
+        "Complete the sign-in in the browser, then come back here (return address registered with the provider: {redirect})" => {
+            "Completa l'accesso nel browser, poi torna qui (indirizzo di ritorno da registrare presso il provider: {redirect})"
+        }
         "Signed in" => "Accesso riuscito",
         "Sign in with Google or Microsoft 365 (OAuth)" => "Accesso con Google o Microsoft 365 (OAuth)",
         "Gmail and Microsoft 365 mailboxes sign in through the provider, like in Thunderbird or Outlook, instead of a password. Each provider asks the app for a client: create it once in the provider's console (free, a few minutes), paste its id and secret here, then choose the provider as sign-in in the account form." => {

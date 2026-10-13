@@ -175,7 +175,12 @@ impl MailApp {
             "account.oauthStart" => {
                 if let Some(url) = v["url"].as_str() {
                     self.requests.push(Request::OpenUrl(url.to_string()));
-                    let text = self.tr("Complete the sign-in in the browser, then come back here").to_string();
+                    // The return address is what the provider's client must list, exactly.
+                    let redirect = v["redirect"].as_str().unwrap_or_default();
+                    let text = self.language.fill(
+                        "Complete the sign-in in the browser, then come back here (return address registered with the provider: {redirect})",
+                        &[("redirect", redirect)],
+                    );
                     self.settings.result = text.clone();
                     self.status = text;
                 }

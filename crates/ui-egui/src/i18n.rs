@@ -101,7 +101,7 @@ pub const LABELS: &[&str] = &[
     "Signed in with {provider}",
     "Sign in again",
     "Create the {provider} client first (fields below)",
-    "Complete the sign-in in the browser, then come back here",
+    "Complete the sign-in in the browser, then come back here (return address registered with the provider: {redirect})",
     "Signed in",
     "Sign in with Google or Microsoft 365 (OAuth)",
     "Gmail and Microsoft 365 mailboxes sign in through the provider, like in Thunderbird or Outlook, instead of a password. Each provider asks the app for a client: create it once in the provider's console (free, a few minutes), paste its id and secret here, then choose the provider as sign-in in the account form.",

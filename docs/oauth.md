@@ -90,6 +90,15 @@ How the browser comes back:
 The callback carries the flow's `state`; only the session that started that flow accepts it,
 so no token is needed on that route.
 
+`redirect_uri_mismatch` means the return address MailCraft sent is not, character for
+character, one of those registered in the client: MailCraft shows the address it sent in the
+status bar when the browser opens (Google's error page shows it too under "request details").
+Compare scheme, host, port, the framework's prefix (`/mailcraft`), the trailing part
+(`/api/oauth/callback`, no slash after it) and the client type (a *Desktop app* client accepts
+only `http://127.0.0.1:…`; a server needs a *Web application* client). After changing
+`MAILCRAFT_PUBLIC_URL`, restart the container; after changing the client in the console, wait
+a minute.
+
 The providers accept the return address only on `localhost` or on **HTTPS with a host name**:
 never a private IP, never plain `http://` on a name. A framework reached as
 `http://192.168.x.y:8080` therefore needs a name with a certificate in front of it and
