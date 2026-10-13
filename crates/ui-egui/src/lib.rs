@@ -12,6 +12,7 @@ pub mod icons;
 mod list;
 mod nav;
 mod reader;
+pub mod richtext;
 mod settings;
 pub mod theme;
 mod widgets;

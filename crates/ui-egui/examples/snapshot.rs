@@ -171,7 +171,7 @@ fn main() {
         if let Some(c) = &mut app.compose {
             c.to = "Luca Bianchi <luca@example.com>".into();
             c.subject = "Sopralluogo di giovedì".into();
-            c.body = "Ciao Luca,\n\nconfermo giovedì alle 15 per il sopralluogo. Porto lo schema della rete.\n\nA presto".into();
+            c.body = "Ciao Luca,\n\nconfermo **giovedì alle 15** per il sopralluogo. Porto lo *schema della rete* e {color=#c5221f}la lista dei materiali{/color}.\n\n{size=large}Da portare:{/size}\n- cavi\n- switch\n{indent}Note: __entro le 14__ in sede, vedi [la planimetria](https://example.com/plan).\n{align=center}Grazie!\n\nA presto".into();
         }
     }
     let ctx = egui::Context::default();

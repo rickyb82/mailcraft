@@ -159,9 +159,6 @@ fn format_row(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, c: &mut crate::C
         if icon_button(ui, t, Icon::Redo, app.tr("Redo"), true, false).clicked() {
             format::undo(&ctx, body_id, &mut c.body, true);
         }
-        ui.add(egui::Label::new(RichText::new("?").small().color(t.muted)).sense(Sense::hover())).on_hover_text(
-            app.tr("Formatting: **bold**, *italic*, __underline__, lists with - or 1., links [text](url); the message goes out as text and HTML"),
-        );
     });
     if let Some(i) = caret {
         format::set_caret(&ctx, body_id, i);
@@ -452,14 +449,28 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                     if !c.hide_format {
                         format_row(app, ui, t, &mut c, body_id);
                     }
-                    let body = ui.add(
-                        egui::TextEdit::multiline(&mut c.body)
-                            .id(body_id)
-                            .desired_rows(14)
-                            .desired_width(width - 28.0)
-                            .frame(egui::Frame::NONE)
-                            .font(FontId::proportional(14.0)),
-                    );
+                    // The text is shown as it will look: marks hidden, styles drawn.
+                    let palette = crate::richtext::Palette { text: t.ui_text, muted: t.muted, link: t.link };
+                    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap_width: f32| {
+                        let job = crate::richtext::layout(ui, buf.as_str(), wrap_width, 14.0, palette, false);
+                        ui.ctx().fonts_mut(|f| f.layout_job(job))
+                    };
+                    let out = egui::TextEdit::multiline(&mut c.body)
+                        .id(body_id)
+                        .desired_rows(14)
+                        .desired_width(width - 28.0)
+                        .frame(egui::Frame::NONE)
+                        .font(FontId::proportional(14.0))
+                        .layouter(&mut layouter)
+                        .show(ui);
+                    let body = out.response.response;
+                    if c.body.contains("**") {
+                        // Faux bold: the bold runs painted once more, half a point to the right.
+                        let wrap = out.galley.job.wrap.max_width;
+                        let job = crate::richtext::layout(ui, &c.body, wrap, 14.0, palette, true);
+                        let bold = ui.ctx().fonts_mut(|f| f.layout_job(job));
+                        ui.painter().with_clip_rect(out.text_clip_rect).galley(out.galley_pos + vec2(0.6, 0.0), bold, egui::Color32::TRANSPARENT);
+                    }
                     if c.focus_body {
                         body.request_focus();
                         if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), body.id) {

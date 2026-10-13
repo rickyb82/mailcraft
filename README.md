@@ -44,9 +44,10 @@ triage and answer your mail. Part of the *craft* family (`gridcraft`, `ideacraft
   cloud.
 - **Write like on Gmail** — the same two toolbars: font, size, bold, italic, underline, text
   colour, alignment, lists, indent, undo/redo above the text (toggled by "Aa"), and Send with
-  its menu, attach, link, emoji, image, signature, print and more below it, on a light markup
-  that goes out as text + HTML; a print button for any message or draft; the compose window
-  drags anywhere so what is behind it stays readable.
+  its menu, attach, link, emoji, image, signature, print and more below it. What you see is
+  what goes out: the text box draws the styles (bigger, coloured, bold, lists, centred lines)
+  and the message leaves as text + HTML; a print button for any message or draft; the compose
+  window drags anywhere so what is behind it stays readable.
 - **Signatures with a logo, recipients that complete themselves** — paste the HTML of your
   signature (logo, bold, links): messages go out as text + HTML with the logo inline, replies
   and forwards included. While you type a recipient, the people seen in your mail or written
