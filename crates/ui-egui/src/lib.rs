@@ -1,0 +1,660 @@
+//! MailCraft's egui front end (layer L6): a Gmail-style client — folders on the left, the
+//! message list, a reading pane, a floating compose window — on top of the engine. It is
+//! thin: it draws `Session` state and acts only through [`MailApp::run`], so every action is
+//! also a command for the CLI and the MCP server.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+
+mod chrome;
+mod compose;
+pub mod i18n;
+pub mod icons;
+mod list;
+mod nav;
+mod reader;
+mod settings;
+pub mod theme;
+mod widgets;
+
+use std::time::{Duration, Instant};
+
+pub use i18n::Language;
+use mailcraft_engine::core::mailbox::Role;
+use mailcraft_engine::core::message::DraftAttachment;
+pub use mailcraft_engine::{self as engine, core};
+use mailcraft_engine::{Completed, Session};
+use serde_json::{Value, json};
+
+/// Which screen fills the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Screen {
+    Mail,
+    Settings,
+}
+
+/// Something only the host app can do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Request {
+    /// Pick files to attach to the compose window.
+    AttachFiles,
+    /// Save an attachment's bytes somewhere.
+    SaveAttachment { name: String, data: Vec<u8> },
+    /// Open a link in the browser.
+    OpenUrl(String),
+}
+
+/// The message being written.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Compose {
+    pub to: String,
+    pub cc: String,
+    pub bcc: String,
+    pub subject: String,
+    pub body: String,
+    pub show_cc: bool,
+    pub attachments: Vec<DraftAttachment>,
+    pub draft_uid: Option<u32>,
+    /// Replying to (mailbox, uid, everyone).
+    pub reply_to: Option<(String, u32, bool)>,
+    /// Forwarding (mailbox, uid).
+    pub forward_of: Option<(String, u32)>,
+    pub minimized: bool,
+    pub focus_body: bool,
+}
+
+/// The whole app state the UI keeps on top of the engine session.
+pub struct MailApp {
+    pub session: Session,
+    pub language: Language,
+    pub dark: bool,
+    applied_dark: Option<bool>,
+    pub screen: Screen,
+    pub search: String,
+    search_focus: bool,
+    pub compose: Option<Compose>,
+    pub status: String,
+    toast: Option<(String, Instant)>,
+    /// Host actions the app should serve (file dialogs, links).
+    pub requests: Vec<Request>,
+    settings: settings::SettingsState,
+    last_sync: Option<Instant>,
+    /// Keep the reader on screen when the reading pane is off (Gmail-style full view).
+    reading_full: bool,
+    /// Messages of the open conversation that were expanded in the reader.
+    expanded: Vec<u32>,
+}
+
+impl MailApp {
+    pub fn new(session: Session) -> Self {
+        let language = match session.config().preferences.language.as_str() {
+            "it" => Language::It,
+            "en" => Language::En,
+            _ => Language::system(),
+        };
+        let dark = session.config().preferences.theme == "dark";
+        let screen = if session.config().accounts.is_empty() { Screen::Settings } else { Screen::Mail };
+        Self {
+            session,
+            language,
+            dark,
+            applied_dark: None,
+            screen,
+            search: String::new(),
+            search_focus: false,
+            compose: None,
+            status: String::new(),
+            toast: None,
+            requests: Vec::new(),
+            settings: settings::SettingsState::default(),
+            last_sync: None,
+            reading_full: false,
+            expanded: Vec::new(),
+        }
+    }
+
+    /// The demo app: the mock mailbox, Italian or English, no files.
+    pub fn demo() -> Self {
+        Self::new(Session::demo())
+    }
+
+    /// Runs a command; failures go to the status bar.
+    pub fn run(&mut self, id: &str, params: Value) -> Option<Value> {
+        match self.session.execute(id, &params) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                self.status = self.language.tr_message(&e.to_string());
+                None
+            }
+        }
+    }
+
+    pub fn tr<'a>(&self, text: &'a str) -> &'a str {
+        self.language.tr(text)
+    }
+
+    pub fn italian(&self) -> bool {
+        self.language == Language::It
+    }
+
+    /// A command's translated label and shortcut, for tooltips.
+    pub fn tip(&self, command: &str) -> String {
+        match mailcraft_engine::command(command) {
+            Some(c) if !c.shortcut.is_empty() => format!("{} ({})", self.tr(c.label), c.shortcut),
+            Some(c) => self.tr(c.label).to_string(),
+            None => command.to_string(),
+        }
+    }
+
+    fn toast(&mut self, text: String) {
+        self.toast = Some((text, Instant::now()));
+    }
+
+    /// Applies finished jobs: status messages, toasts.
+    fn pump(&mut self) {
+        let done: Vec<Completed> = self.session.pump();
+        for c in done {
+            match c.result {
+                Ok(v) => match c.command.as_str() {
+                    "mail.send" | "mail.reply" | "mail.forward" => self.toast(self.tr("Message sent").to_string()),
+                    "draft.save" => self.toast(self.tr("Draft saved").to_string()),
+                    "account.test" => {
+                        let text = if v["ok"] == true {
+                            self.tr("Connection OK: IMAP and SMTP accept the login").to_string()
+                        } else {
+                            format!("IMAP OK · SMTP {}", v["smtp"].as_str().unwrap_or("?"))
+                        };
+                        self.settings.result = text.clone();
+                        self.toast(text);
+                    }
+                    "account.probe" => {
+                        let text =
+                            format!("{}: {} · {}", self.tr("Servers found"), v["imap"].as_str().unwrap_or(""), v["smtp"].as_str().unwrap_or(""));
+                        self.settings.result = text.clone();
+                        self.settings.reload = true;
+                        self.toast(text);
+                    }
+                    "mail.sync" => self.status = self.language.fill("Synced {time}", &[("time", &chrome::clock())]),
+                    _ => {}
+                },
+                Err(e) => {
+                    let text = self.language.tr_message(&e.to_string());
+                    if c.command.starts_with("account.") {
+                        self.settings.result = text.clone();
+                    }
+                    self.status = text;
+                }
+            }
+        }
+    }
+
+    /// Starts a sync of the current account when it is time (or `force`).
+    pub fn sync(&mut self, force: bool) {
+        let minutes = self.session.config().preferences.sync_minutes;
+        let due = match self.last_sync {
+            None => true,
+            Some(t) => minutes > 0 && t.elapsed() >= Duration::from_secs(u64::from(minutes) * 60),
+        };
+        if (force || due) && !self.session.config().accounts.is_empty() {
+            self.last_sync = Some(Instant::now());
+            if self.run("mail.sync", json!({"all": true})).is_some() {
+                self.status = self.tr("Syncing…").to_string();
+            }
+        }
+    }
+
+    /// Shows a mailbox of the current account.
+    pub fn select_mailbox(&mut self, path: &str) {
+        self.search.clear();
+        self.reading_full = false;
+        self.expanded.clear();
+        self.run("mail.select", json!({"mailbox": path}));
+        let _ = self.run("mail.search", json!({"query": ""}));
+    }
+
+    pub fn select_role(&mut self, role: Role) {
+        let account = self.session.view().account.clone();
+        match self.session.folder_for(&account, role) {
+            Some(path) => self.select_mailbox(&path),
+            None => self.status = self.language.fill("No {role} folder on this account", &[("role", role.label(self.italian()))]),
+        }
+    }
+
+    pub fn select_account(&mut self, id: &str) {
+        self.run("account.select", json!({"id": id}));
+        self.search.clear();
+        self.reading_full = false;
+        if self.session.current().is_some_and(|s| s.mailboxes.is_empty()) {
+            self.run("mail.sync", json!({"account": id}));
+        }
+    }
+
+    /// Opens a message in the reader (fetching it when needed).
+    pub fn open(&mut self, uid: u32) {
+        let mailbox = self.session.view().mailbox.clone();
+        self.run("mail.open", json!({"uid": uid, "mailbox": mailbox}));
+        self.expanded = vec![uid];
+        if !self.session.config().preferences.reading_pane {
+            self.reading_full = true;
+        }
+    }
+
+    pub fn close_reader(&mut self) {
+        self.reading_full = false;
+        self.expanded.clear();
+        self.run("selection.clear", json!({}));
+        if let Some(v) = self.session.view().open.clone() {
+            let _ = v;
+        }
+        self.run("view.get", json!({}));
+        self.session_clear_open();
+    }
+
+    fn session_clear_open(&mut self) {
+        // The view's open message is cleared through a selection change (no command needed).
+        let _ = self.run("selection.clear", json!({}));
+    }
+
+    /// Runs a move-style command on the selection (or the open message), with an undo toast.
+    pub fn act(&mut self, command: &str, params: Value) {
+        let mut prm = params;
+        if prm.get("uids").is_none()
+            && self.session.view().selection.is_empty()
+            && let Some((_, uid)) = self.session.view().open.clone()
+        {
+            prm["uids"] = json!([uid]);
+        }
+        if self.run(command, prm).is_some() {
+            let label = match command {
+                "mail.archive" => self.tr("Archived"),
+                "mail.trash" => self.tr("Moved to the trash"),
+                "mail.spam" => self.tr("Reported as spam"),
+                "mail.move" => self.tr("Moved"),
+                "mail.delete" => self.tr("Deleted forever"),
+                "mail.markRead" => self.tr("Marked"),
+                "mail.star" => self.tr("Star changed"),
+                _ => "",
+            };
+            if !label.is_empty() {
+                self.toast(label.to_string());
+            }
+            if matches!(command, "mail.archive" | "mail.trash" | "mail.spam" | "mail.move") {
+                self.reading_full = false;
+            }
+        }
+    }
+
+    pub fn compose_new(&mut self) {
+        self.compose = Some(Compose { focus_body: false, ..Compose::default() });
+    }
+
+    /// Opens a reply (or reply-all) to the open message, with the quote in the body.
+    pub fn compose_reply(&mut self, all: bool) {
+        let Some((mailbox, uid)) = self.session.view().open.clone() else { return };
+        let account = self.session.view().account.clone();
+        let Some(st) = self.session.state(&account) else { return };
+        let Some(m) = st.message(&mailbox, uid) else {
+            self.status = self.tr("Wait for the message to load").to_string();
+            return;
+        };
+        let me = self.session.account(&account).map(|a| a.email.to_ascii_lowercase()).unwrap_or_default();
+        let reply_to: Vec<_> = if m.reply_to.is_empty() { m.envelope.from.clone() } else { m.reply_to.clone() };
+        let mut to: Vec<String> = reply_to.iter().filter(|a| a.email.to_ascii_lowercase() != me).map(|a| a.display()).collect();
+        if to.is_empty() {
+            to = m.envelope.to.iter().map(|a| a.display()).collect();
+        }
+        let cc: Vec<String> = if all {
+            m.envelope
+                .to
+                .iter()
+                .chain(&m.envelope.cc)
+                .filter(|a| a.email.to_ascii_lowercase() != me && !to.iter().any(|t| t.contains(&a.email)))
+                .map(|a| a.display())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let subject = if m.envelope.subject.to_ascii_lowercase().starts_with("re:") {
+            m.envelope.subject.clone()
+        } else {
+            format!("Re: {}", m.envelope.subject)
+        };
+        let quote = core::mime::quote(m, self.italian());
+        self.compose = Some(Compose {
+            to: to.join(", "),
+            cc: cc.join(", "),
+            show_cc: !cc.is_empty(),
+            subject,
+            body: format!("\n{quote}"),
+            reply_to: Some((mailbox, uid, all)),
+            focus_body: true,
+            ..Compose::default()
+        });
+    }
+
+    pub fn compose_forward(&mut self) {
+        let Some((mailbox, uid)) = self.session.view().open.clone() else { return };
+        let account = self.session.view().account.clone();
+        let Some(m) = self.session.state(&account).and_then(|st| st.message(&mailbox, uid)) else {
+            self.status = self.tr("Wait for the message to load").to_string();
+            return;
+        };
+        let subject = if m.envelope.subject.to_ascii_lowercase().starts_with("fwd:") {
+            m.envelope.subject.clone()
+        } else {
+            format!("Fwd: {}", m.envelope.subject)
+        };
+        let header = self.tr("---------- Forwarded message ----------");
+        let body = format!(
+            "\n\n{header}\n{}: {}\n{}: {}\n{}: {}\n{}: {}\n\n{}",
+            self.tr("From"),
+            core::message::join_addresses(&m.envelope.from),
+            self.tr("Date"),
+            core::message::time::long(m.envelope.date, self.italian()),
+            self.tr("Subject"),
+            m.envelope.subject,
+            self.tr("To"),
+            core::message::join_addresses(&m.envelope.to),
+            m.body_text()
+        );
+        let attachments = self
+            .session
+            .state(&account)
+            .and_then(|st| st.raw.get(&(mailbox.clone(), uid)))
+            .map(|raw| core::mime::attachments(raw))
+            .unwrap_or_default();
+        self.compose = Some(Compose { subject, body, attachments, forward_of: Some((mailbox, uid)), ..Compose::default() });
+    }
+
+    fn compose_params(&self, c: &Compose) -> Value {
+        let mut v = json!({"to": c.to, "cc": c.cc, "bcc": c.bcc, "subject": c.subject, "body": c.body});
+        if let Some(uid) = c.draft_uid {
+            v["draft_uid"] = json!(uid);
+        }
+        if let Some((mailbox, uid, _)) = &c.reply_to {
+            v["reply_to_uid"] = json!(uid);
+            v["reply_mailbox"] = json!(mailbox);
+            if let Some(m) = self.session.current().and_then(|st| st.message(mailbox, *uid)) {
+                v["in_reply_to"] = json!(m.envelope.message_id);
+                let mut refs = m.envelope.references.clone();
+                refs.push(m.envelope.message_id.clone());
+                v["references"] = json!(refs);
+            }
+        }
+        if !c.attachments.is_empty() {
+            v["attachments"] = json!(
+                c.attachments.iter().map(|a| json!({"name": a.name, "mime": a.mime, "data": core::mime::base64_encode(&a.data)})).collect::<Vec<_>>()
+            );
+        }
+        v
+    }
+
+    /// Sends the compose window's message.
+    pub fn send_compose(&mut self) {
+        let Some(c) = self.compose.clone() else { return };
+        if c.to.trim().is_empty() && c.cc.trim().is_empty() && c.bcc.trim().is_empty() {
+            self.status = self.tr("Add at least one recipient").to_string();
+            return;
+        }
+        let params = self.compose_params(&c);
+        if self.run("mail.send", params).is_some() {
+            self.compose = None;
+            self.status = self.tr("Sending…").to_string();
+        }
+    }
+
+    pub fn save_draft(&mut self) {
+        let Some(c) = self.compose.clone() else { return };
+        let params = self.compose_params(&c);
+        if self.run("draft.save", params).is_some() {
+            self.status = self.tr("Saving draft…").to_string();
+        }
+    }
+
+    pub fn discard_compose(&mut self) {
+        if let Some(c) = self.compose.take()
+            && let Some(uid) = c.draft_uid
+        {
+            self.run("draft.discard", json!({"uid": uid}));
+        }
+    }
+
+    /// Opens a draft from the Drafts folder in the compose window.
+    pub fn edit_draft(&mut self, uid: u32) {
+        let mailbox = self.session.view().mailbox.clone();
+        let account = self.session.view().account.clone();
+        match self.session.state(&account).and_then(|st| st.message(&mailbox, uid)) {
+            Some(m) => {
+                self.compose = Some(Compose {
+                    to: core::message::join_addresses(&m.envelope.to),
+                    cc: core::message::join_addresses(&m.envelope.cc),
+                    show_cc: !m.envelope.cc.is_empty(),
+                    subject: m.envelope.subject.clone(),
+                    body: m.body_text(),
+                    draft_uid: Some(uid),
+                    ..Compose::default()
+                });
+            }
+            None => {
+                self.run("mail.open", json!({"uid": uid, "mailbox": mailbox, "mark_read": false}));
+                self.expanded = vec![uid];
+            }
+        }
+    }
+
+    pub fn window_title(&self) -> String {
+        let account = self.session.view().account.clone();
+        let unread = self.session.current().and_then(|s| s.by_role(Role::Inbox)).map_or(0, |m| m.unread);
+        let name = self.session.account(&account).map(|a| a.email.clone()).unwrap_or_default();
+        match (unread, name.is_empty()) {
+            (0, true) => "MailCraft".to_string(),
+            (0, false) => format!("{name} – MailCraft"),
+            (n, _) => format!("({n}) {name} – MailCraft"),
+        }
+    }
+
+    /// Keyboard shortcuts (outside text fields).
+    fn keyboard(&mut self, ui: &egui::Ui) {
+        use egui::{Key, Modifiers};
+        if ui.ctx().memory(|m| m.focused().is_some()) {
+            // Cmd+Enter sends from the compose body; Escape leaves fields.
+            if self.compose.is_some() && ui.ctx().input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter)) {
+                self.send_compose();
+            }
+            return;
+        }
+        let pressed = |m: Modifiers, k: Key| ui.ctx().input_mut(|i| i.consume_key(m, k));
+        if pressed(Modifiers::COMMAND, Key::R) {
+            self.sync(true);
+        } else if pressed(Modifiers::NONE, Key::C) && self.screen == Screen::Mail {
+            self.compose_new();
+        } else if pressed(Modifiers::NONE, Key::Slash) {
+            self.search_focus = true;
+        } else if pressed(Modifiers::NONE, Key::Escape) {
+            if self.compose.is_some() {
+                if let Some(c) = &mut self.compose {
+                    c.minimized = !c.minimized;
+                }
+            } else if self.screen == Screen::Settings && !self.session.config().accounts.is_empty() {
+                self.screen = Screen::Mail;
+            } else {
+                self.close_reader();
+            }
+        } else if pressed(Modifiers::NONE, Key::E) {
+            self.act("mail.archive", json!({}));
+        } else if pressed(Modifiers::SHIFT, Key::Num3) || pressed(Modifiers::NONE, Key::Delete) {
+            self.act("mail.trash", json!({}));
+        } else if pressed(Modifiers::NONE, Key::S) {
+            let starred = self.open_envelope().is_some_and(|e| !e.flags.flagged);
+            self.act("mail.star", json!({"starred": starred}));
+        } else if pressed(Modifiers::SHIFT, Key::U) || pressed(Modifiers::NONE, Key::U) {
+            self.act("mail.markRead", json!({"read": false}));
+            self.close_reader();
+        } else if pressed(Modifiers::NONE, Key::R) {
+            self.compose_reply(false);
+        } else if pressed(Modifiers::NONE, Key::A) {
+            self.compose_reply(true);
+        } else if pressed(Modifiers::NONE, Key::F) {
+            self.compose_forward();
+        } else if pressed(Modifiers::NONE, Key::J) || pressed(Modifiers::NONE, Key::ArrowDown) {
+            self.step(1);
+        } else if pressed(Modifiers::NONE, Key::K) || pressed(Modifiers::NONE, Key::ArrowUp) {
+            self.step(-1);
+        } else if pressed(Modifiers::NONE, Key::Enter) {
+            if let Some(uid) = self.session.view().selection.first().copied() {
+                self.open(uid);
+            }
+        } else if pressed(Modifiers::COMMAND, Key::A) {
+            self.run("selection.all", json!({}));
+        } else if pressed(Modifiers::COMMAND, Key::Comma) {
+            self.screen = Screen::Settings;
+        }
+    }
+
+    fn open_envelope(&self) -> Option<core::message::Envelope> {
+        let (mailbox, uid) = self.session.view().open.clone()?;
+        self.session.current()?.envelope(&mailbox, uid).cloned()
+    }
+
+    /// Moves the selection (and the open message) up or down the list.
+    fn step(&mut self, delta: i32) {
+        let uids = list::visible_uids(self);
+        if uids.is_empty() {
+            return;
+        }
+        let current = self.session.view().open.as_ref().map(|(_, u)| *u).or_else(|| self.session.view().selection.first().copied());
+        let i = current.and_then(|u| uids.iter().position(|x| *x == u)).map_or(0, |i| (i as i32 + delta).clamp(0, uids.len() as i32 - 1) as usize);
+        if let Some(uid) = uids.get(i).copied() {
+            self.run("selection.set", json!({"uids": [uid]}));
+            if self.session.view().open.is_some() {
+                self.open(uid);
+            }
+        }
+    }
+
+    /// Draws the app.
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
+        let tokens = theme::Tokens::for_dark_mode(self.dark);
+        if self.applied_dark != Some(self.dark) {
+            theme::apply(ui.ctx(), &tokens);
+            self.applied_dark = Some(self.dark);
+        }
+        self.pump();
+        self.sync(false);
+        if self.session.jobs_pending() > 0 {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
+        }
+        self.keyboard(ui);
+        chrome::top_bar(self, ui, &tokens);
+        chrome::status_bar(self, ui, &tokens);
+        match self.screen {
+            Screen::Settings => settings::show(self, ui, &tokens),
+            Screen::Mail => {
+                nav::show(self, ui, &tokens);
+                let reading_pane = self.session.config().preferences.reading_pane;
+                let open = self.session.view().open.is_some();
+                if reading_pane && open {
+                    egui::Panel::right("reader")
+                        .default_size(560.0)
+                        .min_size(360.0)
+                        .resizable(true)
+                        .frame(egui::Frame::NONE.fill(tokens.card))
+                        .show(ui, |ui| reader::show(self, ui, &tokens));
+                }
+                egui::CentralPanel::default().frame(egui::Frame::NONE.fill(tokens.panel)).show(ui, |ui| {
+                    if !reading_pane && self.reading_full && open {
+                        reader::show(self, ui, &tokens);
+                    } else {
+                        list::show(self, ui, &tokens);
+                    }
+                });
+            }
+        }
+        compose::show(self, ui, &tokens);
+        chrome::toast(self, ui, &tokens);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn frame(app: &mut MailApp, ctx: &egui::Context, events: Vec<egui::Event>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0))),
+            events,
+            ..Default::default()
+        };
+        let mut out = ctx.run_ui(input, |ui| app.ui(ui));
+        out.textures_delta.clear();
+    }
+
+    fn key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    fn settle(app: &mut MailApp, ctx: &egui::Context) {
+        for _ in 0..30 {
+            frame(app, ctx, vec![]);
+            if app.session.jobs_pending() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn demo_renders_reads_replies_and_settles() {
+        let ctx = egui::Context::default();
+        let mut app = MailApp::demo();
+        app.language = Language::It;
+        settle(&mut app, &ctx);
+        assert_eq!(app.screen, Screen::Mail);
+        let first = list::visible_uids(&app)[0];
+        app.open(first);
+        settle(&mut app, &ctx);
+        assert!(app.session.current().unwrap().message("INBOX", first).is_some());
+        assert!(app.window_title().contains("riccardo@example.it"));
+        frame(&mut app, &ctx, vec![key(egui::Key::R, egui::Modifiers::NONE)]);
+        assert!(app.compose.as_ref().is_some_and(|c| c.subject.starts_with("Re: ") && c.body.contains("ha scritto:")));
+        app.send_compose();
+        settle(&mut app, &ctx);
+        assert!(app.compose.is_none());
+        assert!(app.status.contains("Sincronizz") || app.toast.is_some() || app.status.contains("Invio"), "{}", app.status);
+        frame(&mut app, &ctx, vec![key(egui::Key::E, egui::Modifiers::NONE)]);
+        settle(&mut app, &ctx);
+        assert!(app.session.current().unwrap().envelope("INBOX", first).is_none(), "archived");
+        // j/k move the selection, c opens compose, Escape minimises it, settings render.
+        frame(&mut app, &ctx, vec![key(egui::Key::J, egui::Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![key(egui::Key::J, egui::Modifiers::NONE)]);
+        frame(&mut app, &ctx, vec![key(egui::Key::K, egui::Modifiers::NONE)]);
+        assert_eq!(app.session.view().selection.len(), 1);
+        frame(&mut app, &ctx, vec![key(egui::Key::C, egui::Modifiers::NONE)]);
+        assert!(app.compose.is_some());
+        frame(&mut app, &ctx, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(app.compose.as_ref().is_some_and(|c| c.minimized));
+        app.compose = None;
+        app.search = "fattura".into();
+        app.run("mail.search", json!({"query": "fattura"}));
+        settle(&mut app, &ctx);
+        assert_eq!(list::visible_uids(&app).len(), 1);
+        app.select_role(Role::Sent);
+        settle(&mut app, &ctx);
+        assert!(!list::visible_uids(&app).is_empty());
+        app.screen = Screen::Settings;
+        app.dark = true;
+        frame(&mut app, &ctx, vec![]);
+        app.settings.editing = Some(settings::AccountForm::from_email("anna@gmail.com"));
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert_eq!(app.screen, Screen::Mail);
+    }
+
+    #[test]
+    fn empty_configuration_opens_settings() {
+        let ctx = egui::Context::default();
+        let mut app = MailApp::new(Session::new(Box::new(|_| Box::new(core::mock::MockBackend::new())), None));
+        assert_eq!(app.screen, Screen::Settings);
+        frame(&mut app, &ctx, vec![]);
+        frame(&mut app, &ctx, vec![key(egui::Key::C, egui::Modifiers::NONE), key(egui::Key::E, egui::Modifiers::NONE)]);
+        assert!(app.compose.is_none());
+    }
+}

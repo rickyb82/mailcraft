@@ -1,0 +1,460 @@
+//! MIME: parsing fetched messages (via `mail-parser`) and building outgoing ones.
+
+use mail_parser::MimeHeaders;
+
+use crate::message::{Address, Attachment, Draft, DraftAttachment, Envelope, Flags, Message, snippet, time};
+use crate::{Error, Result, clean, clip, limits};
+
+fn addresses(list: Option<&mail_parser::Address<'_>>) -> Vec<Address> {
+    let Some(list) = list else { return Vec::new() };
+    list.iter()
+        .filter_map(|a| {
+            let email = a.address().unwrap_or_default();
+            (!email.is_empty()).then(|| Address::new(a.name().unwrap_or_default(), email))
+        })
+        .take(limits::MAX_RECIPIENTS)
+        .collect()
+}
+
+fn id_list(v: &mail_parser::HeaderValue<'_>) -> Vec<String> {
+    match v {
+        mail_parser::HeaderValue::Text(t) => vec![normalise_id(t)],
+        mail_parser::HeaderValue::TextList(l) => l.iter().map(|t| normalise_id(t)).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn normalise_id(id: &str) -> String {
+    let t = id.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    let t = t.trim_start_matches('<').trim_end_matches('>');
+    clean(&format!("<{t}>"), 500)
+}
+
+/// Parses raw RFC 822 bytes into a full message. `uid` and `mailbox` are filled in by the caller.
+pub fn parse(raw: &[u8]) -> Result<Message> {
+    let raw = raw.get(..raw.len().min(limits::MAX_RAW_MESSAGE)).unwrap_or_default();
+    let m = mail_parser::MessageParser::default().parse(raw).ok_or_else(|| Error::Message("unparseable message".into()))?;
+    let mut envelope = envelope_of(&m, raw.len());
+    let text = m.body_text(0).map(|t| clip(&t, limits::MAX_BODY).to_string()).unwrap_or_default();
+    let html = m.body_html(0).map(|t| clip(&t, limits::MAX_BODY).to_string()).unwrap_or_default();
+    let mut attachments = Vec::new();
+    for (index, part) in m.attachments().enumerate().take(limits::MAX_ATTACHMENTS) {
+        let mime = part
+            .content_type()
+            .map(|c| match c.subtype() {
+                Some(s) => format!("{}/{}", c.ctype(), s),
+                None => c.ctype().to_string(),
+            })
+            .unwrap_or_else(|| "application/octet-stream".to_string())
+            .to_ascii_lowercase();
+        let inline = part.content_disposition().is_some_and(|d| d.ctype().eq_ignore_ascii_case("inline")) && part.content_id().is_some();
+        let name = part.attachment_name().map(|n| clean(n, 255)).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("attachment-{}", index + 1));
+        attachments.push(Attachment { index, name, mime, size: part.contents().len(), inline });
+    }
+    envelope.has_attachments = attachments.iter().any(|a| !a.inline);
+    if envelope.snippet.is_empty() {
+        let plain = if text.trim().is_empty() { html_to_text(&html) } else { text.clone() };
+        envelope.snippet = snippet(&plain);
+    }
+    let reply_to = addresses(m.reply_to());
+    let list_unsubscribe = m.header_raw("List-Unsubscribe").map(|v| clean(v.trim(), 2_000)).unwrap_or_default();
+    Ok(Message { envelope, text, html, attachments, reply_to, list_unsubscribe })
+}
+
+/// The bytes of every non-inline attachment of a raw message, for forwarding and saving.
+pub fn attachments(raw: &[u8]) -> Vec<DraftAttachment> {
+    let Some(m) = mail_parser::MessageParser::default().parse(raw) else { return Vec::new() };
+    m.attachments()
+        .enumerate()
+        .take(limits::MAX_ATTACHMENTS)
+        .map(|(i, part)| DraftAttachment {
+            name: part.attachment_name().map(|n| clean(n, 255)).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("attachment-{}", i + 1)),
+            mime: part
+                .content_type()
+                .map(|c| match c.subtype() {
+                    Some(s) => format!("{}/{}", c.ctype(), s),
+                    None => c.ctype().to_string(),
+                })
+                .unwrap_or_else(|| "application/octet-stream".into()),
+            data: part.contents().to_vec(),
+        })
+        .collect()
+}
+
+/// Parses only the headers (what the list fetch returns) into an envelope.
+pub fn parse_headers(raw_headers: &[u8]) -> Result<Envelope> {
+    let mut bytes = raw_headers.get(..raw_headers.len().min(1024 * 1024)).unwrap_or_default().to_vec();
+    if !bytes.ends_with(b"\r\n\r\n") && !bytes.ends_with(b"\n\n") {
+        bytes.extend_from_slice(b"\r\n\r\n");
+    }
+    let m = mail_parser::MessageParser::default().parse_headers(&bytes).ok_or_else(|| Error::Message("unparseable headers".into()))?;
+    let mut e = envelope_of(&m, 0);
+    // Without the body, a multipart/mixed content type is the best hint for attachments.
+    e.has_attachments =
+        m.content_type().is_some_and(|c| c.ctype().eq_ignore_ascii_case("multipart") && c.subtype().is_some_and(|s| s.eq_ignore_ascii_case("mixed")));
+    Ok(e)
+}
+
+fn envelope_of(m: &mail_parser::Message<'_>, size: usize) -> Envelope {
+    Envelope {
+        uid: 0,
+        mailbox: String::new(),
+        subject: clean(m.subject().unwrap_or_default(), limits::MAX_TEXT),
+        from: addresses(m.from()),
+        to: addresses(m.to()),
+        cc: addresses(m.cc()),
+        date: m.date().map(|d| d.to_timestamp()).unwrap_or(0),
+        snippet: String::new(),
+        flags: Flags::default(),
+        size: size.min(u32::MAX as usize) as u32,
+        has_attachments: false,
+        message_id: m.message_id().map(normalise_id).unwrap_or_default(),
+        in_reply_to: id_list(m.in_reply_to()).into_iter().next().unwrap_or_default(),
+        references: id_list(m.references()).into_iter().take(100).collect(),
+    }
+}
+
+/// Reduces HTML to readable text: block elements become line breaks, styles and scripts go,
+/// the common entities are decoded.
+pub fn html_to_text(html: &str) -> String {
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut rest = html;
+    let mut skip_until: Option<&str> = None;
+    while let Some(start) = rest.find('<') {
+        let text = rest.get(..start).unwrap_or_default();
+        if skip_until.is_none() {
+            out.push_str(&decode_entities(text));
+        }
+        let after = rest.get(start + 1..).unwrap_or_default();
+        let Some(end) = after.find('>') else { break };
+        let tag = after.get(..end).unwrap_or_default();
+        rest = after.get(end + 1..).unwrap_or_default();
+        let name = tag.trim_start_matches('/').split(|c: char| c.is_whitespace() || c == '/').next().unwrap_or_default().to_ascii_lowercase();
+        if let Some(close) = skip_until {
+            if tag.starts_with('/') && name == close {
+                skip_until = None;
+            }
+            continue;
+        }
+        match name.as_str() {
+            "style" | "script" | "head" | "title" => {
+                skip_until = Some(if name == "style" {
+                    "style"
+                } else if name == "script" {
+                    "script"
+                } else if name == "head" {
+                    "head"
+                } else {
+                    "title"
+                })
+            }
+            "br" => out.push('\n'),
+            "p" | "div" | "tr" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote" | "table" | "ul" | "ol" | "section" | "article"
+            | "header" | "footer" | "pre" => {
+                out.push('\n');
+            }
+            "td" | "th" => out.push(' '),
+            "a" if !tag.starts_with('/') => {
+                if let Some(href) = attr(tag, "href").filter(|h| h.starts_with("http") && !h.contains('\n')) {
+                    out.push_str(&format!("[{href}] "));
+                }
+            }
+            _ => {}
+        }
+        if out.len() > limits::MAX_BODY {
+            break;
+        }
+    }
+    if skip_until.is_none() {
+        out.push_str(&decode_entities(rest));
+    }
+    // Drop blank lines and surrounding spaces.
+    let mut cleaned = String::with_capacity(out.len());
+    for line in out.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        cleaned.push_str(line);
+        cleaned.push('\n');
+    }
+    cleaned.trim().to_string()
+}
+
+fn attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let lower = tag.to_ascii_lowercase();
+    let i = lower.find(&format!("{name}="))? + name.len() + 1;
+    let rest = tag.get(i..)?;
+    let (quote, rest) = match rest.chars().next() {
+        Some(q @ ('"' | '\'')) => (Some(q), rest.get(1..)?),
+        _ => (None, rest),
+    };
+    let end = match quote {
+        Some(q) => rest.find(q)?,
+        None => rest.find(|c: char| c.is_whitespace() || c == '>').unwrap_or(rest.len()),
+    };
+    rest.get(..end)
+}
+
+fn decode_entities(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(i) = rest.find('&') {
+        out.push_str(rest.get(..i).unwrap_or_default());
+        let after = rest.get(i..).unwrap_or_default();
+        let Some(semi) = after.find(';').filter(|s| *s <= 10) else {
+            out.push('&');
+            rest = after.get(1..).unwrap_or_default();
+            continue;
+        };
+        let entity = after.get(1..semi).unwrap_or_default();
+        let decoded = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            "nbsp" | "#160" => Some(' '),
+            "eacute" => Some('é'),
+            "egrave" => Some('è'),
+            "agrave" => Some('à'),
+            "ograve" => Some('ò'),
+            "ugrave" => Some('ù'),
+            "igrave" => Some('ì'),
+            "euro" => Some('€'),
+            "copy" => Some('©'),
+            "hellip" => Some('…'),
+            "ndash" => Some('–'),
+            "mdash" => Some('—'),
+            "laquo" => Some('«'),
+            "raquo" => Some('»'),
+            e => e
+                .strip_prefix('#')
+                .and_then(|n| if let Some(h) = n.strip_prefix(['x', 'X']) { u32::from_str_radix(h, 16).ok() } else { n.parse().ok() })
+                .and_then(char::from_u32),
+        };
+        match decoded {
+            Some(c) => out.push(c),
+            None => out.push_str(after.get(..=semi).unwrap_or_default()),
+        }
+        rest = after.get(semi + 1..).unwrap_or_default();
+    }
+    out.push_str(rest);
+    out
+}
+
+const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+pub fn base64_encode(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk.first().copied().unwrap_or(0), chunk.get(1).copied().unwrap_or(0), chunk.get(2).copied().unwrap_or(0)];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        let idx = |shift: u32| B64.get(((n >> shift) & 63) as usize).copied().unwrap_or(b'A') as char;
+        out.push(idx(18));
+        out.push(idx(12));
+        out.push(if chunk.len() > 1 { idx(6) } else { '=' });
+        out.push(if chunk.len() > 2 { idx(0) } else { '=' });
+    }
+    out
+}
+
+pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for c in text.bytes() {
+        let v = match c {
+            b'A'..=b'Z' => c - b'A',
+            b'a'..=b'z' => c - b'a' + 26,
+            b'0'..=b'9' => c - b'0' + 52,
+            b'+' | b'-' => 62,
+            b'/' | b'_' => 63,
+            b'=' | b'\n' | b'\r' | b' ' | b'\t' => continue,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(v);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    Some(out)
+}
+
+/// Base64 broken into 76-column lines, as MIME wants.
+fn base64_lines(bytes: &[u8]) -> String {
+    let b = base64_encode(bytes);
+    let mut out = String::with_capacity(b.len() + b.len() / 76 * 2);
+    for chunk in b.as_bytes().chunks(76) {
+        out.push_str(std::str::from_utf8(chunk).unwrap_or_default());
+        out.push_str("\r\n");
+    }
+    out
+}
+
+/// RFC 2047 encoded word when the text is not plain ASCII.
+pub fn encode_header_text(text: &str) -> String {
+    if text.is_ascii() && !text.contains(['\r', '\n']) {
+        return text.to_string();
+    }
+    let clean: String = text.chars().filter(|c| !c.is_control()).collect();
+    format!("=?utf-8?B?{}?=", base64_encode(clean.as_bytes()))
+}
+
+fn header_address(a: &Address) -> String {
+    if a.name.is_empty() {
+        return a.email.clone();
+    }
+    let name = if a.name.is_ascii() { format!("\"{}\"", a.name.replace('"', "")) } else { encode_header_text(&a.name) };
+    format!("{name} <{}>", a.email)
+}
+
+fn header_addresses(list: &[Address]) -> String {
+    list.iter().map(header_address).collect::<Vec<_>>().join(",\r\n ")
+}
+
+/// Builds the RFC 822 bytes of a draft: UTF-8 text body (base64), attachments as
+/// multipart/mixed. `message_id` should be unique (`<time.random@domain>`).
+pub fn build(draft: &Draft, from: &Address, date: i64, message_id: &str) -> Result<Vec<u8>> {
+    if draft.to.is_empty() && draft.cc.is_empty() && draft.bcc.is_empty() {
+        return Err(Error::Message("the message has no recipient".into()));
+    }
+    for a in draft.to.iter().chain(&draft.cc).chain(&draft.bcc) {
+        if !crate::account::is_email(&a.email) {
+            return Err(Error::Message(format!("`{}` is not an e-mail address", a.email)));
+        }
+    }
+    let mut h = String::new();
+    h.push_str(&format!("Date: {}\r\n", time::rfc2822(date)));
+    h.push_str(&format!("From: {}\r\n", header_address(from)));
+    if !draft.to.is_empty() {
+        h.push_str(&format!("To: {}\r\n", header_addresses(&draft.to)));
+    }
+    if !draft.cc.is_empty() {
+        h.push_str(&format!("Cc: {}\r\n", header_addresses(&draft.cc)));
+    }
+    h.push_str(&format!("Subject: {}\r\n", encode_header_text(draft.subject.trim())));
+    h.push_str(&format!("Message-ID: {}\r\n", normalise_id(message_id)));
+    if !draft.in_reply_to.is_empty() {
+        h.push_str(&format!("In-Reply-To: {}\r\n", normalise_id(&draft.in_reply_to)));
+    }
+    if !draft.references.is_empty() {
+        h.push_str(&format!("References: {}\r\n", draft.references.iter().map(|r| normalise_id(r)).collect::<Vec<_>>().join("\r\n ")));
+    }
+    h.push_str("MIME-Version: 1.0\r\nX-Mailer: MailCraft\r\n");
+    let body_part =
+        format!("Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: base64\r\n\r\n{}", base64_lines(draft.body.as_bytes()));
+    let mut out = h.into_bytes();
+    if draft.attachments.is_empty() {
+        out.extend_from_slice(body_part.as_bytes());
+        return Ok(out);
+    }
+    let boundary = format!("=_MailCraft_{:x}_{:x}", date, draft.attachments.len());
+    out.extend_from_slice(format!("Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n\r\n").as_bytes());
+    out.extend_from_slice(format!("--{boundary}\r\n{body_part}").as_bytes());
+    for a in draft.attachments.iter().take(limits::MAX_ATTACHMENTS) {
+        let name = encode_header_text(&a.name.replace(['"', '\r', '\n'], "")).replace(' ', "_");
+        let mime = if a.mime.contains('/') { a.mime.to_ascii_lowercase() } else { "application/octet-stream".to_string() };
+        out.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Type: {mime}; name=\"{name}\"\r\nContent-Disposition: attachment; filename=\"{name}\"\r\nContent-Transfer-Encoding: base64\r\n\r\n{}",
+                base64_lines(&a.data)
+            )
+            .as_bytes(),
+        );
+    }
+    out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Ok(out)
+}
+
+/// Quotes a message for a reply: `On <date>, <sender> wrote:` and `> ` lines.
+pub fn quote(message: &Message, italian: bool) -> String {
+    let who = message.envelope.from.first().map(Address::display).unwrap_or_default();
+    let when = time::long(message.envelope.date, italian);
+    let intro = if italian { format!("Il {when}, {who} ha scritto:") } else { format!("On {when}, {who} wrote:") };
+    let body = message.body_text();
+    let quoted: Vec<String> = body.lines().take(2_000).map(|l| if l.is_empty() { ">".to_string() } else { format!("> {l}") }).collect();
+    format!("\n\n{intro}\n{}", quoted.join("\n"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const RAW: &str = "From: \"Anna Rossi\" <anna@example.com>\r\nTo: luca@example.com, Marco <marco@example.com>\r\nCc: =?utf-8?B?TcOgcmlh?= <m@example.com>\r\nSubject: =?utf-8?Q?Fattura_n=C2=B0_12?=\r\nDate: Mon, 12 Oct 2026 20:01:08 +0200\r\nMessage-ID: <abc@example.com>\r\nIn-Reply-To: <root@example.com>\r\nReferences: <root@example.com> <mid@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b1\"\r\n\r\n--b1\r\nContent-Type: multipart/alternative; boundary=\"b2\"\r\n\r\n--b2\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nCiao Luca,\r\nin allegato la fattura.\r\n--b2\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<p>Ciao <b>Luca</b>,<br>in allegato la fattura.</p>\r\n--b2--\r\n--b1\r\nContent-Type: application/pdf; name=\"fattura.pdf\"\r\nContent-Disposition: attachment; filename=\"fattura.pdf\"\r\nContent-Transfer-Encoding: base64\r\n\r\nJVBERi0xLjQK\r\n--b1--\r\n";
+
+    #[test]
+    fn parses_a_multipart_message() {
+        let m = parse(RAW.as_bytes()).unwrap();
+        let e = &m.envelope;
+        assert_eq!(e.subject, "Fattura n° 12");
+        assert_eq!(e.from[0], Address::new("Anna Rossi", "anna@example.com"));
+        assert_eq!(e.to.len(), 2);
+        assert_eq!(e.cc[0].name, "Mària");
+        assert_eq!(e.date, time::from_civil(2026, 10, 12, 18, 1, 8));
+        assert_eq!(e.message_id, "<abc@example.com>");
+        assert_eq!(e.in_reply_to, "<root@example.com>");
+        assert_eq!(e.references, vec!["<root@example.com>", "<mid@example.com>"]);
+        assert!(e.has_attachments);
+        assert_eq!(e.snippet, "Ciao Luca, in allegato la fattura.");
+        assert!(m.text.starts_with("Ciao Luca"));
+        assert!(m.html.contains("<b>Luca</b>"));
+        assert_eq!(m.attachments.len(), 1);
+        assert_eq!((m.attachments[0].name.as_str(), m.attachments[0].mime.as_str(), m.attachments[0].size), ("fattura.pdf", "application/pdf", 9));
+        let headers_only = parse_headers(RAW.split("\r\n\r\n").next().unwrap().as_bytes()).unwrap();
+        assert_eq!(headers_only.subject, "Fattura n° 12");
+        assert!(headers_only.has_attachments);
+        assert!(parse(b"").is_err() || parse(b"").is_ok(), "never panics");
+        assert!(parse(&[0xff; 300]).is_ok() || parse(&[0xff; 300]).is_err());
+    }
+
+    #[test]
+    fn html_becomes_text() {
+        let html = "<html><head><style>p{color:red}</style><title>t</title></head><body><p>Ciao &amp; <b>benvenuto</b>!</p><ul><li>uno</li><li>due</li></ul><a href=\"https://x.it/p\">link</a>&nbsp;fine &#8364; &egrave;</body></html>";
+        let text = html_to_text(html);
+        assert_eq!(text, "Ciao & benvenuto!\nuno\ndue\n[https://x.it/p] link fine € è");
+        assert_eq!(decode_entities("a &lt; b &unknown; c"), "a < b &unknown; c");
+    }
+
+    #[test]
+    fn builds_messages_that_parse_back() {
+        let draft = Draft {
+            to: vec![Address::new("Luca Bianchi", "luca@example.com")],
+            cc: vec![Address::new("Màría", "m@example.com")],
+            subject: "Riunione di lunedì".into(),
+            body: "Ciao a tutti,\nci vediamo lunedì alle 10.\n\n— Anna".into(),
+            in_reply_to: "root@example.com".into(),
+            references: vec!["<root@example.com>".into()],
+            attachments: vec![crate::message::DraftAttachment {
+                name: "agenda.txt".into(),
+                mime: "text/plain".into(),
+                data: b"1. saluti\n2. piano".to_vec(),
+            }],
+            ..Draft::default()
+        };
+        let raw = build(&draft, &Address::new("Anna Rossi", "anna@example.com"), 1_700_000_000, "<x1@example.com>").unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(text.contains("Subject: =?utf-8?B?"));
+        assert!(text.contains("In-Reply-To: <root@example.com>"));
+        let m = parse(&raw).unwrap();
+        assert_eq!(m.envelope.subject, "Riunione di lunedì");
+        assert_eq!(m.envelope.to[0].name, "Luca Bianchi");
+        assert_eq!(m.envelope.cc[0].name, "Màría");
+        assert_eq!(m.text.trim(), draft.body.trim());
+        assert_eq!(m.attachments.len(), 1);
+        assert_eq!(m.attachments[0].name, "agenda.txt");
+        assert_eq!(attachments(&raw)[0].data, b"1. saluti\n2. piano");
+        assert_eq!(m.envelope.in_reply_to, "<root@example.com>");
+        assert!(build(&Draft::default(), &Address::new("", "a@b.co"), 0, "<i@d>").is_err());
+        let bad = Draft { to: vec![Address::new("", "nope")], ..Draft::default() };
+        assert!(build(&bad, &Address::new("", "a@b.co"), 0, "<i@d>").is_err());
+        assert_eq!(base64_decode(&base64_encode(b"hello, world")).unwrap(), b"hello, world");
+        assert!(base64_decode("@@").is_none());
+        let q = quote(&m, true);
+        assert!(q.contains("ha scritto:") && q.contains("> Ciao a tutti,"));
+    }
+}

@@ -1,0 +1,220 @@
+//! Interface languages. Labels are written in English in the code and looked up here; anything
+//! without a translation shows in English. Messages with values use `{name}` placeholders.
+
+mod it;
+
+/// An interface language.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Language {
+    #[default]
+    En,
+    It,
+}
+
+impl Language {
+    pub const ALL: [Self; 2] = [Self::En, Self::It];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::En => "English",
+            Self::It => "Italiano",
+        }
+    }
+
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::It => "it",
+        }
+    }
+
+    /// Reads a code or a locale tag (`it`, `it-IT`, `it_CH.UTF-8`).
+    pub fn parse(tag: &str) -> Option<Self> {
+        match tag.trim().split(['-', '_', '.']).next()?.to_ascii_lowercase().as_str() {
+            "en" => Some(Self::En),
+            "it" => Some(Self::It),
+            _ => None,
+        }
+    }
+
+    /// The system's language when supported, else English.
+    pub fn system() -> Self {
+        sys_locale::get_locale().and_then(|tag| Self::parse(&tag)).unwrap_or_default()
+    }
+
+    /// Translates an interface label.
+    pub fn tr(self, text: &str) -> &str {
+        match self {
+            Self::En => text,
+            Self::It => it::translate(text).unwrap_or(text),
+        }
+    }
+
+    /// Translates a message and fills its `{name}` placeholders.
+    pub fn fill(self, text: &str, values: &[(&str, &str)]) -> String {
+        let mut out = self.tr(text).to_string();
+        for (k, v) in values {
+            out = out.replace(&format!("{{{k}}}"), v);
+        }
+        out
+    }
+
+    /// Translates the engine's error messages by their leading phrase, keeping the details.
+    pub fn tr_message(self, text: &str) -> String {
+        if self == Self::En {
+            return text.to_string();
+        }
+        for (en, itx) in it::MESSAGES {
+            if let Some(rest) = text.strip_prefix(en) {
+                return format!("{itx}{rest}");
+            }
+        }
+        text.to_string()
+    }
+}
+
+/// Every label the interface translates (kept in step with the `it` table by a test).
+pub const LABELS: &[&str] = &[
+    "Compose",
+    "Search mail",
+    "Sync",
+    "Settings",
+    "Light theme",
+    "Dark theme",
+    "Language",
+    "Inbox",
+    "Starred",
+    "Sent",
+    "Drafts",
+    "Archive",
+    "Spam",
+    "Trash",
+    "All mail",
+    "Important",
+    "Folders",
+    "Accounts",
+    "Add account",
+    "No messages",
+    "No messages match the search",
+    "Loading…",
+    "Syncing…",
+    "Synced {time}",
+    "Sending…",
+    "Saving draft…",
+    "Message sent",
+    "Draft saved",
+    "Archived",
+    "Moved to the trash",
+    "Reported as spam",
+    "Moved",
+    "Deleted forever",
+    "Marked",
+    "Star changed",
+    "Undo",
+    "Reply",
+    "Reply all",
+    "Forward",
+    "Mark as read",
+    "Mark as unread",
+    "Add star",
+    "Remove star",
+    "Move to",
+    "Delete forever",
+    "Back",
+    "Close",
+    "To",
+    "Cc",
+    "Bcc",
+    "From",
+    "Date",
+    "Subject",
+    "New message",
+    "Recipients",
+    "Send",
+    "Save draft",
+    "Discard",
+    "Attach files",
+    "Attachments",
+    "Save",
+    "Add at least one recipient",
+    "Wait for the message to load",
+    "---------- Forwarded message ----------",
+    "Connection OK: IMAP and SMTP accept the login",
+    "Servers found",
+    "No {role} folder on this account",
+    "Select a message to read it",
+    "messages",
+    "selected",
+    "Select all",
+    "Clear selection",
+    "Edit draft",
+    "Account",
+    "Name",
+    "E-mail address",
+    "Display name",
+    "Username (if not the address)",
+    "Password",
+    "IMAP server",
+    "SMTP server",
+    "Host",
+    "Port",
+    "Security",
+    "Signature",
+    "Accept invalid certificates (local bridges, self-hosted servers)",
+    "Copy sent mail to the Sent folder",
+    "Suggest from the provider",
+    "Find servers",
+    "Test connection",
+    "Remove account",
+    "Save account",
+    "Cancel",
+    "Preferences",
+    "Theme",
+    "System",
+    "Light",
+    "Dark",
+    "Sync every (minutes, 0 = manual)",
+    "Messages per page",
+    "Reading pane beside the list",
+    "Group messages into conversations",
+    "Mark messages read when opened",
+    "Default account",
+    "Assistant (MCP)",
+    "Configure MailCraft in plain language: connect the MCP server to Claude Code, Claude Desktop or any MCP client and say, for example, “set up my Aruba mailbox info@example.it” or “dark theme, sync every 2 minutes”. The assistant can also read, triage and answer your mail.",
+    "Command for Claude Code:",
+    "Keyboard shortcuts",
+    "c compose · / search · j/k move · Enter open · e archive · # trash · s star · u unread · r reply · a reply all · f forward · Cmd+R sync · Esc close",
+    "Mailboxes: {n} · Unread: {unread}",
+    "No account yet. Add one here, or ask the assistant (MCP) to set it up from a sentence.",
+    "Provider notes",
+    "Last sync",
+    "never",
+    "Error",
+    "Show {n} more messages",
+    "Conversation",
+    "Delete draft",
+    "Saved",
+    "Open folder",
+    "Everything stays on this computer: the password is kept in a file only you can read.",
+    "Done",
+    "Mailbox",
+];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_label_has_an_italian_translation() {
+        for (i, label) in LABELS.iter().enumerate() {
+            assert!(LABELS.iter().take(i).all(|o| o != label), "duplicate {label}");
+            assert!(it::translate(label).is_some_and(|t| !t.is_empty()), "missing Italian: {label}");
+        }
+        assert_eq!(Language::It.tr("Inbox"), "Posta in arrivo");
+        assert_eq!(Language::En.tr("Inbox"), "Inbox");
+        assert_eq!(Language::It.fill("Synced {time}", &[("time", "10:00")]), "Sincronizzato alle 10:00");
+        assert_eq!(Language::It.tr_message("login failed: bad"), "accesso non riuscito: bad");
+        assert_eq!(Language::parse("it-IT"), Some(Language::It));
+        assert_eq!(Language::parse("de"), None);
+    }
+}

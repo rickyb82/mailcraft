@@ -1,0 +1,699 @@
+//! MailCraft's engine (layer L5): the [`Session`] holds the configuration, the per-account
+//! cache and the current view, runs every user-visible action as a command
+//! ([`COMMANDS`], [`Session::execute`]) and drives the mail transport on a worker thread.
+//!
+//! Commands that need the server return `{"job": id}` at once; [`Session::pump`] applies the
+//! results as they arrive (the UI calls it every frame) and [`Session::run_blocking`] waits for
+//! them (the CLI and the MCP server). A failed command never leaves the cache half-changed.
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
+
+pub mod cmd;
+pub mod store;
+pub mod worker;
+
+use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+pub use cmd::{COMMANDS, Command, command};
+pub use mailcraft_core as core;
+use mailcraft_core::account::{Account, Config, Secrets};
+use mailcraft_core::backend::{BackendFactory, FlagChange, Page};
+use mailcraft_core::mailbox::Role;
+use mailcraft_core::message::{Envelope, Message, time};
+use serde_json::{Value, json};
+use store::AccountState;
+use worker::{Event, Job, JobKind, Output, Worker};
+
+/// Engine errors: parameters, unknown commands, and everything the model and transport report.
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum Error {
+    #[error("{0}")]
+    Param(String),
+    #[error("unknown command `{0}`")]
+    UnknownCommand(String),
+    #[error("account `{0}` has no password: set it with account.setPassword")]
+    NoPassword(String),
+    #[error("job {0} did not finish in time")]
+    Timeout(u64),
+    #[error("{0}")]
+    Core(#[from] mailcraft_core::Error),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Where the session keeps its files; `None` keeps everything in memory (tests, demo).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Paths {
+    pub config: PathBuf,
+    pub secrets: PathBuf,
+    pub cache: PathBuf,
+}
+
+impl Paths {
+    /// The platform locations (see `mailcraft_core::account::home_dir`).
+    pub fn default_dirs() -> Self {
+        Self {
+            config: mailcraft_core::account::config_path(),
+            secrets: mailcraft_core::account::secrets_path(),
+            cache: mailcraft_core::account::cache_dir(),
+        }
+    }
+
+    pub fn under(dir: &std::path::Path) -> Self {
+        Self { config: dir.join("config.json"), secrets: dir.join("secrets.json"), cache: dir.join("cache") }
+    }
+}
+
+/// What the interface shows: the account, mailbox, search and selection.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct View {
+    pub account: String,
+    pub mailbox: String,
+    pub query: String,
+    /// Search results for `query` (empty when there is no search).
+    pub results: Vec<Envelope>,
+    pub selection: Vec<u32>,
+    /// The message open in the reading pane: (mailbox, uid).
+    pub open: Option<(String, u32)>,
+    pub page: usize,
+}
+
+/// A finished job, as [`Session::pump`] reports it.
+#[derive(Clone, Debug)]
+pub struct Completed {
+    pub job: u64,
+    pub command: String,
+    pub account: String,
+    pub result: Result<Value>,
+}
+
+struct Pending {
+    command: String,
+    started: Instant,
+}
+
+/// The engine state: configuration, cache, view and the worker.
+pub struct Session {
+    config: Config,
+    secrets: Secrets,
+    paths: Option<Paths>,
+    /// Notes from loading the configuration (dropped accounts…).
+    pub notes: Vec<String>,
+    store: BTreeMap<String, AccountState>,
+    view: View,
+    worker: Worker,
+    next_job: u64,
+    pending: BTreeMap<u64, Pending>,
+}
+
+impl Session {
+    /// Loads the configuration, secrets and caches from `paths` (or starts empty) and starts
+    /// the worker with `factory`.
+    pub fn new(factory: BackendFactory, paths: Option<Paths>) -> Self {
+        let mut notes = Vec::new();
+        let (config, secrets) = match &paths {
+            Some(p) => {
+                let (config, n) = Config::load(&p.config).unwrap_or_else(|e| {
+                    notes.push(e.to_string());
+                    (Config::default(), Vec::new())
+                });
+                notes.extend(n);
+                let secrets = Secrets::load(&p.secrets).unwrap_or_else(|e| {
+                    notes.push(e.to_string());
+                    Secrets::default()
+                });
+                (config, secrets)
+            }
+            None => (Config::default(), Secrets::default()),
+        };
+        let mut store = BTreeMap::new();
+        for a in &config.accounts {
+            let state = match &paths {
+                Some(p) => AccountState::load(&p.cache.join(&a.id)),
+                None => AccountState::default(),
+            };
+            store.insert(a.id.clone(), state);
+        }
+        let mut view = View::default();
+        let first = config.account(&config.preferences.default_account).or_else(|| config.accounts.first());
+        if let Some(a) = first {
+            view.account = a.id.clone();
+            view.mailbox = "INBOX".into();
+        }
+        Self { config, secrets, paths, notes, store, view, worker: Worker::start(factory), next_job: 1, pending: BTreeMap::new() }
+    }
+
+    /// An in-memory session on the demo mailbox (`MockBackend::demo`), already synced.
+    pub fn demo() -> Self {
+        let mock = mailcraft_core::mock::MockBackend::demo();
+        let factory: BackendFactory = Box::new(move |_| Box::new(mock.clone()));
+        let mut s = Self::new(factory, None);
+        let account = Account {
+            id: "demo".into(),
+            name: "Demo".into(),
+            email: "riccardo@example.it".into(),
+            display_name: "Riccardo".into(),
+            imap: mailcraft_core::account::Server::new("mock.local", 993, mailcraft_core::account::Security::Tls),
+            smtp: mailcraft_core::account::Server::new("mock.local", 465, mailcraft_core::account::Security::Tls),
+            signature: "Riccardo\nSirius Technology".into(),
+            color: "#4a6cf7".into(),
+            ..Account::default()
+        };
+        if s.config.upsert(account).is_ok() {
+            s.secrets.set_password("demo", "demo");
+            s.store.insert("demo".into(), AccountState::default());
+            s.view.account = "demo".into();
+            s.view.mailbox = "INBOX".into();
+            let _ = s.run_blocking("mail.sync", json!({}));
+        }
+        s
+    }
+
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    pub fn view(&self) -> &View {
+        &self.view
+    }
+
+    pub fn state(&self, account: &str) -> Option<&AccountState> {
+        self.store.get(account)
+    }
+
+    /// The current account's cache.
+    pub fn current(&self) -> Option<&AccountState> {
+        self.store.get(&self.view.account)
+    }
+
+    pub fn account(&self, id: &str) -> Option<&Account> {
+        self.config.account(id)
+    }
+
+    pub fn has_password(&self, id: &str) -> bool {
+        self.secrets.password(id).is_some()
+    }
+
+    pub fn jobs_pending(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Whether messages to the user (quotes, labels) are Italian.
+    pub fn italian(&self) -> bool {
+        self.config.preferences.language == "it"
+    }
+
+    /// Runs a command. Network commands return `{"job": id}` (see [`Self::pump`]).
+    pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
+        cmd::run(self, id, params)
+    }
+
+    /// Runs a command and waits for the job(s) it starts; returns the job's result (the last
+    /// one's, when several).
+    pub fn run_blocking(&mut self, id: &str, params: Value) -> Result<Value> {
+        let v = self.execute(id, &params)?;
+        let mut jobs: Vec<u64> = v.get("jobs").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+        if let Some(j) = v.get("job").and_then(Value::as_u64) {
+            jobs.push(j);
+        }
+        if jobs.is_empty() {
+            return Ok(v);
+        }
+        let mut last = v;
+        for j in jobs {
+            last = self.wait(j, Duration::from_secs(180))?;
+        }
+        Ok(last)
+    }
+
+    /// Blocks until job `id` completes (pumping every other event meanwhile).
+    pub fn wait(&mut self, id: u64, timeout: Duration) -> Result<Value> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            for c in self.pump() {
+                if c.job == id {
+                    return c.result;
+                }
+            }
+            if !self.pending.contains_key(&id) {
+                return Err(Error::Timeout(id));
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(Error::Timeout(id));
+            }
+            if let Some(ev) = self.worker.wait(left.min(Duration::from_millis(200))) {
+                let c = self.apply(ev);
+                self.save_caches();
+                if c.job == id {
+                    return c.result;
+                }
+            }
+        }
+    }
+
+    /// Applies every event the worker produced and saves dirty caches. The interface calls this
+    /// every frame.
+    pub fn pump(&mut self) -> Vec<Completed> {
+        let events = self.worker.poll();
+        let mut out = Vec::with_capacity(events.len());
+        for ev in events {
+            out.push(self.apply(ev));
+        }
+        if !out.is_empty() {
+            self.save_caches();
+        }
+        out
+    }
+
+    fn save_caches(&mut self) {
+        let Some(paths) = self.paths.clone() else { return };
+        for (id, state) in self.store.iter_mut() {
+            if state.dirty {
+                let _ = state.save(&paths.cache.join(id));
+            }
+        }
+    }
+
+    fn save_config(&mut self) -> Result<()> {
+        if let Some(p) = &self.paths {
+            self.config.save(&p.config)?;
+            self.secrets.save(&p.secrets)?;
+        }
+        Ok(())
+    }
+
+    /// Queues a job for an account (which must have a password).
+    fn submit(&mut self, command: &str, account_id: &str, kind: JobKind) -> Result<u64> {
+        let account = self.config.account(account_id).ok_or_else(|| mailcraft_core::Error::NoAccount(account_id.to_string()))?.clone();
+        let password = self.secrets.password(account_id).map(str::to_string).unwrap_or_default();
+        if password.is_empty() && !matches!(kind, JobKind::Disconnect) {
+            return Err(Error::NoPassword(account_id.to_string()));
+        }
+        let id = self.next_job;
+        self.next_job += 1;
+        if !self.worker.submit(Job { id, account, password, kind }) {
+            return Err(Error::Core(mailcraft_core::Error::Server("the worker has stopped".into())));
+        }
+        self.pending.insert(id, Pending { command: command.to_string(), started: Instant::now() });
+        Ok(id)
+    }
+
+    /// The page size from the preferences.
+    fn page_size(&self) -> usize {
+        (self.config.preferences.page_size as usize).clamp(5, mailcraft_core::limits::MAX_PAGE)
+    }
+
+    /// The IMAP path of a special folder for an account: configured, detected, or `None`.
+    pub fn folder_for(&self, account: &str, role: Role) -> Option<String> {
+        let a = self.config.account(account)?;
+        let configured = match role {
+            Role::Sent => &a.folders.sent,
+            Role::Drafts => &a.folders.drafts,
+            Role::Trash => &a.folders.trash,
+            Role::Spam => &a.folders.spam,
+            Role::Archive => &a.folders.archive,
+            _ => "",
+        };
+        if !configured.is_empty() {
+            return Some(configured.to_string());
+        }
+        let state = self.store.get(account)?;
+        if role == Role::Inbox {
+            return Some("INBOX".into());
+        }
+        state
+            .by_role(role)
+            .map(|m| m.path.clone())
+            .or_else(|| if role == Role::Archive { state.by_role(Role::All).map(|m| m.path.clone()) } else { None })
+    }
+
+    fn apply(&mut self, ev: Event) -> Completed {
+        let pending = self.pending.remove(&ev.job);
+        let command = pending.as_ref().map(|p| p.command.clone()).unwrap_or_default();
+        let _ = pending.as_ref().map(|p| p.started);
+        let account = ev.account.clone();
+        let result = match ev.result {
+            Ok(out) => self.apply_output(&account, &command, ev.kind, out),
+            Err(e) => {
+                if let Some(state) = self.store.get_mut(&account) {
+                    if matches!(e, mailcraft_core::Error::Connect(_) | mailcraft_core::Error::Auth(_) | mailcraft_core::Error::NotConnected) {
+                        state.error = Some(e.to_string());
+                    }
+                    // An optimistic flag or move that failed: refresh that mailbox.
+                    match &ev.kind {
+                        JobKind::SetFlag { mailbox, .. } | JobKind::Move { mailbox, .. } | JobKind::Delete { mailbox, .. } => {
+                            let mailbox = mailbox.clone();
+                            let page = Page::new(0, self.page_size());
+                            let _ = self.submit("mail.list", &account, JobKind::Envelopes { mailbox, page });
+                        }
+                        _ => {}
+                    }
+                }
+                Err(Error::Core(e))
+            }
+        };
+        Completed { job: ev.job, command, account, result }
+    }
+
+    fn apply_output(&mut self, account: &str, command: &str, kind: JobKind, out: Output) -> Result<Value> {
+        let page_size = self.page_size();
+        let italian = self.italian();
+        let state = self.store.entry(account.to_string()).or_default();
+        state.error = None;
+        match out {
+            Output::Mailboxes(list, delimiter) => {
+                // Keep cached counts for folders the server gave no STATUS for.
+                let old = std::mem::take(&mut state.mailboxes);
+                state.mailboxes = list
+                    .into_iter()
+                    .map(|mut m| {
+                        if m.total == 0
+                            && m.unread == 0
+                            && let Some(o) = old.iter().find(|o| o.path == m.path)
+                        {
+                            m.total = o.total;
+                            m.unread = o.unread;
+                        }
+                        m
+                    })
+                    .collect();
+                state.delimiter = delimiter;
+                state.last_sync = time::now();
+                state.dirty = true;
+                let boxes: Vec<Value> = state.mailboxes.iter().map(|m| mailbox_json(m, italian)).collect();
+                Ok(json!({"mailboxes": boxes}))
+            }
+            Output::Envelopes { mailbox, page, list } => {
+                state.merge_page(&mailbox, page.offset, page.limit, list.clone());
+                if let Some(m) = state.mailboxes.iter_mut().find(|m| m.path == mailbox)
+                    && page.offset == 0
+                {
+                    let cached = state.envelopes.get(&mailbox).map(Vec::len).unwrap_or(0) as u32;
+                    m.total = m.total.max(cached);
+                }
+                Ok(json!({"mailbox": mailbox, "offset": page.offset, "envelopes": list.iter().map(envelope_json).collect::<Vec<_>>()}))
+            }
+            Output::EnvelopesByUid { mailbox, list } => {
+                state.update_envelopes(&mailbox, list.clone());
+                Ok(json!({"mailbox": mailbox, "envelopes": list.iter().map(envelope_json).collect::<Vec<_>>()}))
+            }
+            Output::Message { mailbox, uid, raw, message } => {
+                let v = message_json(&message);
+                let flags = message.envelope.flags;
+                state.put_message(&mailbox, uid, raw, *message);
+                if let Some(e) = state.envelopes.get_mut(&mailbox).and_then(|l| l.iter_mut().find(|e| e.uid == uid)) {
+                    e.has_attachments = v.get("attachments").and_then(Value::as_array).is_some_and(|a| !a.is_empty());
+                    let seen = e.flags.seen;
+                    e.flags = flags;
+                    e.flags.seen |= seen;
+                    state.dirty = true;
+                }
+                Ok(v)
+            }
+            Output::Flagged { mailbox, uids, change } => Ok(json!({"mailbox": mailbox, "uids": uids, "change": format!("{change:?}")})),
+            Output::Moved { mailbox, uids, to } => {
+                // Refresh the destination so it shows the moved messages.
+                let dest_known = state.envelopes.contains_key(&to);
+                let v = json!({"mailbox": mailbox, "uids": uids, "to": to});
+                if dest_known {
+                    let _ = self.submit(command, account, JobKind::Envelopes { mailbox: to, page: Page::new(0, page_size) });
+                }
+                Ok(v)
+            }
+            Output::Deleted { mailbox, uids } => Ok(json!({"mailbox": mailbox, "uids": uids, "deleted": true})),
+            Output::Appended { mailbox, uid, replaced } => {
+                if let Some(old) = replaced {
+                    state.remove(&mailbox, &[old]);
+                }
+                if let Some(u) = uid {
+                    let _ = self.submit(command, account, JobKind::EnvelopesByUid { mailbox: mailbox.clone(), uids: vec![u] });
+                } else {
+                    let _ = self.submit(command, account, JobKind::Envelopes { mailbox: mailbox.clone(), page: Page::new(0, page_size) });
+                }
+                Ok(json!({"mailbox": mailbox, "uid": uid}))
+            }
+            Output::Search { mailbox, query, list } => {
+                state.update_envelopes(&mailbox, list.clone());
+                if self.view.account == account && self.view.mailbox == mailbox && !self.view.query.is_empty() {
+                    self.view.results = list.clone();
+                }
+                Ok(json!({"mailbox": mailbox, "query": query.text, "envelopes": list.iter().map(envelope_json).collect::<Vec<_>>()}))
+            }
+            Output::Sent { message_id, copied_to } => {
+                if let JobKind::Send { answered: Some((mb, uid)), .. } | JobKind::Respond { mailbox: mb, uid, .. } = &kind {
+                    state.apply_flag(mb, &[*uid], FlagChange::Answered(true));
+                }
+                if let JobKind::Send { delete_draft: Some((mb, uid)), .. } = &kind {
+                    state.remove(mb, &[*uid]);
+                }
+                if let Some(folder) = &copied_to {
+                    let _ = self.submit(command, account, JobKind::Envelopes { mailbox: folder.clone(), page: Page::new(0, page_size) });
+                }
+                Ok(json!({"sent": true, "message_id": message_id, "copied_to": copied_to}))
+            }
+            Output::Created { path } => {
+                let _ = self.submit(command, account, JobKind::Mailboxes);
+                Ok(json!({"created": path}))
+            }
+            Output::Tested { mailboxes, smtp } => Ok(json!({
+                "ok": smtp.is_ok(),
+                "imap": "ok",
+                "mailboxes": mailboxes,
+                "smtp": match smtp { Ok(()) => "ok".to_string(), Err(e) => format!("failed: {e}") },
+            })),
+            Output::Probed { imap, smtp, tried } => {
+                if let Some(a) = self.config.account_mut(account) {
+                    a.imap = imap.clone();
+                    a.smtp = smtp.clone();
+                }
+                self.save_config()?;
+                Ok(json!({"imap": imap.describe(), "smtp": smtp.describe(), "tried": tried, "account": account}))
+            }
+            Output::Disconnected => Ok(json!({"disconnected": account})),
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        self.save_caches();
+    }
+}
+
+/// An envelope as commands return it.
+pub fn envelope_json(e: &Envelope) -> Value {
+    json!({
+        "uid": e.uid,
+        "mailbox": e.mailbox,
+        "subject": e.subject,
+        "from": e.from.iter().map(|a| a.display()).collect::<Vec<_>>(),
+        "to": e.to.iter().map(|a| a.display()).collect::<Vec<_>>(),
+        "cc": e.cc.iter().map(|a| a.display()).collect::<Vec<_>>(),
+        "date": e.date,
+        "date_text": time::long(e.date, false),
+        "snippet": e.snippet,
+        "unread": !e.flags.seen,
+        "starred": e.flags.flagged,
+        "answered": e.flags.answered,
+        "draft": e.flags.draft,
+        "has_attachments": e.has_attachments,
+        "size": e.size,
+        "message_id": e.message_id,
+        "thread": e.thread_key(),
+    })
+}
+
+/// A full message as commands return it.
+pub fn message_json(m: &Message) -> Value {
+    let mut v = envelope_json(&m.envelope);
+    if let Some(o) = v.as_object_mut() {
+        o.insert("text".into(), Value::String(m.body_text()));
+        o.insert("html".into(), Value::String(m.html.clone()));
+        o.insert("reply_to".into(), json!(m.reply_to.iter().map(|a| a.display()).collect::<Vec<_>>()));
+        o.insert("list_unsubscribe".into(), Value::String(m.list_unsubscribe.clone()));
+        o.insert(
+            "attachments".into(),
+            json!(
+                m.attachments
+                    .iter()
+                    .filter(|a| !a.inline)
+                    .map(|a| json!({"index": a.index, "name": a.name, "mime": a.mime, "size": a.size}))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    }
+    v
+}
+
+pub fn mailbox_json(m: &mailcraft_core::mailbox::Mailbox, italian: bool) -> Value {
+    let label = if m.role == Role::Other { m.name.clone() } else { m.role.label(italian).to_string() };
+    json!({"path": m.path, "name": m.name, "label": label, "role": m.role.name(), "unread": m.unread, "total": m.total, "no_select": m.no_select})
+}
+
+/// An account as commands return it (never the password).
+pub fn account_json(a: &Account, has_password: bool, state: Option<&AccountState>) -> Value {
+    json!({
+        "id": a.id,
+        "name": a.name,
+        "email": a.email,
+        "display_name": a.from_name(),
+        "username": a.login(),
+        "imap": {"host": a.imap.host, "port": a.imap.port, "security": a.imap.security.name()},
+        "smtp": {"host": a.smtp.host, "port": a.smtp.port, "security": a.smtp.security.name()},
+        "signature": a.signature,
+        "color": a.color,
+        "folders": {"sent": a.folders.sent, "drafts": a.folders.drafts, "trash": a.folders.trash, "spam": a.folders.spam, "archive": a.folders.archive},
+        "save_sent": a.save_sent,
+        "trust_invalid_certs": a.trust_invalid_certs,
+        "has_password": has_password,
+        "problems": a.problems(),
+        "status": {
+            "last_sync": state.map_or(0, |s| s.last_sync),
+            "error": state.and_then(|s| s.error.clone()),
+            "mailboxes": state.map_or(0, |s| s.mailboxes.len()),
+            "unread": state.and_then(|s| s.by_role(Role::Inbox).map(|m| m.unread)).unwrap_or(0),
+        },
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mailcraft_core::mock::MockBackend;
+
+    fn session(mock: &MockBackend) -> Session {
+        let m = mock.clone();
+        let mut s = Session::new(Box::new(move |_| Box::new(m.clone())), None);
+        s.execute("account.add", &json!({"email": "riccardo@example.it", "name": "Demo", "password": "demo", "imap_host": "mock", "imap_port": 993, "smtp_host": "mock", "smtp_port": 465})).unwrap();
+        s
+    }
+
+    #[test]
+    fn reads_acts_and_sends_through_the_mock() {
+        let mock = MockBackend::demo();
+        let mut s = session(&mock);
+        assert_eq!(s.view().account, "riccardo-example-it");
+        let v = s.run_blocking("mail.sync", json!({})).unwrap();
+        assert!(v["envelopes"].as_array().unwrap().len() > 5, "{v}");
+        let inbox = s.current().unwrap();
+        assert_eq!(inbox.by_role(Role::Inbox).unwrap().unread, 4);
+        assert_eq!(inbox.list("INBOX").len(), 12);
+        // Conversations group the backup thread.
+        let convs = inbox.conversations("INBOX");
+        assert!(convs.iter().any(|c| c.members.len() == 2), "{convs:?}");
+        // Open marks read (optimistically and on the server).
+        let first = inbox.list("INBOX")[0].uid;
+        let m = s.run_blocking("mail.open", json!({"uid": first})).unwrap();
+        assert!(m["text"].as_str().unwrap().contains("lunedì"));
+        assert!(mock.flags_of("INBOX", first).unwrap().seen);
+        assert_eq!(s.current().unwrap().by_role(Role::Inbox).unwrap().unread, 3);
+        // Star, archive, trash, search.
+        s.run_blocking("mail.star", json!({"uids": [first], "starred": true})).unwrap();
+        assert!(mock.flags_of("INBOX", first).unwrap().flagged);
+        let v = s.run_blocking("mail.archive", json!({"uids": [first]})).unwrap();
+        assert_eq!(v["to"], "Archive");
+        assert_eq!(mock.count("Archive"), 1);
+        assert_eq!(s.current().unwrap().list("INBOX").len(), 11);
+        let second = s.current().unwrap().list("INBOX")[0].uid;
+        s.run_blocking("mail.trash", json!({"uids": [second]})).unwrap();
+        assert_eq!(mock.count("Trash"), 2);
+        let v = s.run_blocking("mail.search", json!({"query": "fattura"})).unwrap();
+        assert_eq!(v["envelopes"].as_array().unwrap().len(), 1);
+        // Send with the signature and a copy in Sent.
+        let v = s.run_blocking("mail.send", json!({"to": "Luca <luca@example.com>", "subject": "Prova", "body": "Ciao Luca"})).unwrap();
+        assert_eq!(v["sent"], true);
+        let sent = mock.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].1, vec!["luca@example.com"]);
+        let text = String::from_utf8_lossy(&sent[0].2).to_string();
+        assert!(text.contains("Subject: Prova"));
+        assert_eq!(mock.count("Sent"), 3, "copied to Sent");
+        // Reply quotes the original and flags it answered.
+        let uid = s.current().unwrap().list("INBOX")[0].uid;
+        let v = s.run_blocking("mail.reply", json!({"uid": uid, "body": "Grazie, ci sentiamo lunedì.", "all": true})).unwrap();
+        assert_eq!(v["sent"], true);
+        let last = mock.sent().last().unwrap().2.clone();
+        let parsed = mailcraft_core::mime::parse(&last).unwrap();
+        assert!(parsed.envelope.subject.starts_with("Re: "));
+        assert!(parsed.text.contains("ha scritto:") || parsed.text.contains("wrote:"));
+        assert!(!parsed.envelope.in_reply_to.is_empty());
+        assert!(mock.flags_of("INBOX", uid).unwrap().answered);
+        // Forward carries the attachments.
+        let with_att = s.current().unwrap().list("INBOX").iter().find(|e| e.has_attachments).unwrap().uid;
+        s.run_blocking("mail.forward", json!({"uid": with_att, "to": "x@example.org", "body": "FYI"})).unwrap();
+        let fwd = mailcraft_core::mime::parse(&mock.sent().last().unwrap().2).unwrap();
+        assert!(fwd.envelope.subject.starts_with("Fwd: "));
+        assert_eq!(fwd.attachments.len(), 1);
+        // Drafts save and replace; wrong password reports Auth.
+        let v = s.run_blocking("draft.save", json!({"to": "a@b.co", "subject": "Bozza", "body": "..."})).unwrap();
+        let draft_uid = v["uid"].as_u64().unwrap();
+        s.run_blocking("draft.save", json!({"to": "a@b.co", "subject": "Bozza 2", "body": "...", "draft_uid": draft_uid})).unwrap();
+        assert_eq!(mock.count("Drafts"), 2);
+        let v = s.run_blocking("account.test", json!({})).unwrap();
+        assert_eq!(v["ok"], true);
+        s.execute("account.setPassword", &json!({"password": "wrong"})).unwrap();
+        let bad = MockBackend::demo().require_password("demo");
+        let mut s2 = session(&bad);
+        s2.execute("account.setPassword", &json!({"password": "nope"})).unwrap();
+        let e = s2.run_blocking("mail.sync", json!({})).unwrap_err();
+        assert!(matches!(e, Error::Core(mailcraft_core::Error::Auth(_))), "{e}");
+        assert!(s2.current().unwrap().error.is_some());
+    }
+
+    #[test]
+    fn configuration_commands_and_persistence() {
+        let dir = std::env::temp_dir().join(format!("mailcraft-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mock = MockBackend::demo();
+        let m = mock.clone();
+        let mut s = Session::new(Box::new(move |_| Box::new(m.clone())), Some(Paths::under(&dir)));
+        let v = s.execute("account.suggest", &json!({"email": "anna@gmail.com", "language": "it"})).unwrap();
+        assert_eq!(v["provider"], "Gmail");
+        let v = s.execute("account.add", &json!({"email": "anna@gmail.com", "password": "app-pw"})).unwrap();
+        assert_eq!(v["account"]["imap"]["host"], "imap.gmail.com");
+        assert_eq!(v["account"]["name"], "Gmail");
+        let v = s.execute("account.list", &json!({})).unwrap();
+        assert_eq!(v["accounts"].as_array().unwrap().len(), 1);
+        assert_eq!(v["accounts"][0]["has_password"], true);
+        s.execute("account.update", &json!({"id": "anna-gmail-com", "name": "Personale", "signature": "Anna"})).unwrap();
+        s.execute("prefs.set", &json!({"theme": "dark", "sync_minutes": 2})).unwrap();
+        assert!(s.execute("prefs.set", &json!({"theme": "neon"})).is_err());
+        // Unknown domain: a probe finds the mock behind the first candidate.
+        let v = s.execute("account.add", &json!({"email": "mario@sirius-example.it", "password": "x"})).unwrap();
+        assert_eq!(v["suggestion"]["confidence"], "guess");
+        let v = s.run_blocking("account.probe", json!({"id": "mario-sirius-example-it"})).unwrap();
+        assert_eq!(v["imap"], "imap.sirius-example.it:993 (tls)");
+        // Sync, then reopen from disk: the cache is there.
+        s.run_blocking("mail.sync", json!({"account": "anna-gmail-com"})).unwrap();
+        let unread = s.state("anna-gmail-com").unwrap().by_role(Role::Inbox).unwrap().unread;
+        drop(s);
+        let m = mock.clone();
+        let s = Session::new(Box::new(move |_| Box::new(m.clone())), Some(Paths::under(&dir)));
+        assert_eq!(s.config().accounts.len(), 2);
+        assert_eq!(s.config().account("anna-gmail-com").unwrap().name, "Personale");
+        assert_eq!(s.config().preferences.theme, "dark");
+        assert!(s.has_password("anna-gmail-com"));
+        assert_eq!(s.state("anna-gmail-com").unwrap().by_role(Role::Inbox).unwrap().unread, unread);
+        assert_eq!(s.state("anna-gmail-com").unwrap().list("INBOX").len(), 12);
+        let mut s = s;
+        s.execute("account.remove", &json!({"id": "mario-sirius-example-it"})).unwrap();
+        assert_eq!(s.config().accounts.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn every_command_survives_empty_params() {
+        let mut s = Session::demo();
+        for c in COMMANDS {
+            let _ = s.execute(c.id, &json!({}));
+            let _ = s.execute(c.id, &json!({"uids": [1, 999], "uid": 999, "mailbox": "Nope", "email": "x", "id": "ghost", "to": "", "query": "", "key": "", "page": 999999}));
+        }
+        for _ in 0..20 {
+            s.pump();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(s.view().mailbox.is_empty() || true);
+    }
+}

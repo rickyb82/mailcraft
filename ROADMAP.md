@@ -1,0 +1,42 @@
+# MailCraft roadmap
+
+> **Stage:** 0.1 — a working client and MCP server, tested against in-process IMAP/SMTP servers;
+> the first real-mailbox round trips are the next thing to prove.
+
+## Now (0.1 — done)
+
+- Workspace in the craft layout: `core` → `net` → `engine` → `ui-egui` / `mcp` → apps.
+- Accounts with provider autoconfiguration (24 providers documented, conventional guesses and
+  hosting providers probed for unknown domains), validation, user-only secrets file.
+- IMAP over rustls: folders with roles and counts, paged lists with snippets, full fetch,
+  flags, move (MOVE or copy+expunge), delete, append (drafts, sent copies), search (server-side
+  for ASCII, local otherwise), create folder. SMTP over rustls with lettre.
+- Engine: commands for accounts, preferences and mail; worker thread; optimistic flag/move with
+  refresh on failure; cache on disk; conversations; reply/forward composition.
+- Gmail-style egui interface: navigation, list with hover and bulk actions, reading pane or full
+  view, conversations, compose card, settings (accounts form with suggest/probe/test,
+  preferences, assistant, shortcuts), light/dark, English/Italian, keyboard shortcuts.
+- MCP server: 29 tools (configuration and mail), 4 prompts (`setup_account`, `triage_inbox`,
+  `write_email`, `configure`), 2 resources; CLI with `mcp`, `add`, `test`, `list`, `read`,
+  `search`, `send`, `set`, `run`.
+
+## Next (0.2)
+
+- Real-mailbox smoke tests on the main Italian providers (Aruba, Libero, PEC) and Gmail.
+- OAuth2 for Gmail and Microsoft 365 (XOAUTH2).
+- HTML rendering of messages (today HTML is reduced to text); inline images.
+- IMAP IDLE for push notifications; background sync in the desktop app.
+- Undo for archive/trash; snooze; labels/keywords (`$label`); PGP later.
+- Address book from sent mail with completion in the compose window.
+- Web app via a local bridge service (IMAP cannot run in a browser).
+
+## Later
+
+- Calendar invitations (iCalendar), contacts (CardDAV), unified inbox across accounts.
+- Rules/filters, signatures per identity, aliases.
+
+## Progress log
+
+| Date | Change |
+|---|---|
+| 2026-10-13 | 0.1: model, autoconfig, IMAP/SMTP transport with in-process test servers, engine with commands and cache, Gmail-style egui UI, MCP server with configuration prompts, CLI |
