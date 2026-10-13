@@ -109,6 +109,174 @@ pub fn text_to_html(text: &str) -> String {
     format!("<div style=\"font-family:Helvetica,Arial,sans-serif;font-size:14px;white-space:pre-wrap\">{out}</div>")
 }
 
+/// The light markup the compose window writes (`**bold**`, `*italic*`, `__underline__`,
+/// `- item`, `1. item`, `[text](url)`, `![name](cid:…)`, bare links) rendered as HTML; plain
+/// text comes through unchanged apart from line breaks.
+pub fn markup_to_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut list: Option<&str> = None;
+    let close_list = |out: &mut String, list: &mut Option<&str>| {
+        if let Some(tag) = list.take() {
+            out.push_str(&format!("</{tag}>"));
+        }
+    };
+    for line in text.lines().take(20_000) {
+        let trimmed = line.trim_start();
+        let (tag, item) = if let Some(rest) = trimmed.strip_prefix("- ").or_else(|| trimmed.strip_prefix("* ")) {
+            ("ul", Some(rest))
+        } else if let Some(rest) = numbered_item(trimmed) {
+            ("ol", Some(rest))
+        } else {
+            ("", None)
+        };
+        match item {
+            Some(rest) => {
+                if list != Some(tag) {
+                    close_list(&mut out, &mut list);
+                    out.push_str(&format!("<{tag}>"));
+                    list = Some(tag);
+                }
+                out.push_str(&format!("<li>{}</li>", inline_markup(rest)));
+            }
+            None => {
+                close_list(&mut out, &mut list);
+                out.push_str(&inline_markup(line));
+                out.push_str("<br>\n");
+            }
+        }
+    }
+    close_list(&mut out, &mut list);
+    format!("<div style=\"font-family:Helvetica,Arial,sans-serif;font-size:14px\">{out}</div>")
+}
+
+/// `1. text` → `text`.
+fn numbered_item(line: &str) -> Option<&str> {
+    let i = line.find(". ")?;
+    let digits = line.get(..i)?;
+    if i > 0 && digits.chars().all(|c| c.is_ascii_digit()) { line.get(i + 2..) } else { None }
+}
+
+/// Does the text use the compose markup (so an HTML part is worth sending)?
+pub fn has_markup(text: &str) -> bool {
+    text.contains("**")
+        || text.contains("__")
+        || text.contains("](")
+        || text.lines().any(|l| {
+            let t = l.trim_start();
+            t.starts_with("- ") || t.starts_with("* ") || numbered_item(t).is_some()
+        })
+        || text.matches('*').count() >= 2
+}
+
+/// Inline spans of one line: images, links, bold, italic, underline, bare URLs.
+fn inline_markup(line: &str) -> String {
+    // Images and links first (their URLs must not be escaped or autolinked twice).
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(i) = rest.find('[') {
+        let image = i > 0 && rest.as_bytes().get(i - 1) == Some(&b'!');
+        let Some((text, after)) = rest.get(i + 1..).and_then(|r| r.split_once("](")) else { break };
+        let Some((url, tail)) = after.split_once(')') else { break };
+        if url.contains(['<', '>', '"', ' ']) {
+            break;
+        }
+        out.push_str(&spans(rest.get(..if image { i - 1 } else { i }).unwrap_or_default()));
+        if image {
+            out.push_str(&format!("<img src=\"{}\" alt=\"{}\" style=\"max-width:100%\">", escape_html(url), escape_html(text)));
+        } else {
+            out.push_str(&format!("<a href=\"{}\">{}</a>", escape_html(url), spans(text)));
+        }
+        rest = tail;
+    }
+    out.push_str(&spans(rest));
+    out
+}
+
+/// `**bold**`, `*italic*`, `__underline__` and bare links in text without brackets.
+fn spans(text: &str) -> String {
+    const MARKS: [(&str, &str); 3] = [("**", "b"), ("__", "u"), ("*", "i")];
+    let mut out = String::new();
+    let mut open = [false; 3];
+    let mut rest = text;
+    while !rest.is_empty() {
+        let next = MARKS.iter().enumerate().filter_map(|(k, (m, _))| rest.find(m).map(|i| (i, k))).min();
+        let Some((i, k)) = next else {
+            out.push_str(&autolink(rest));
+            break;
+        };
+        let (mark, tag) = MARKS[k];
+        out.push_str(&autolink(rest.get(..i).unwrap_or_default()));
+        rest = rest.get(i + mark.len()..).unwrap_or_default();
+        if open[k] {
+            out.push_str(&format!("</{tag}>"));
+        } else if rest.contains(mark) {
+            out.push_str(&format!("<{tag}>"));
+        } else {
+            out.push_str(&escape_html(mark));
+            continue;
+        }
+        open[k] = !open[k];
+    }
+    for (k, is_open) in open.iter().enumerate() {
+        if *is_open {
+            out.push_str(&format!("</{}>", MARKS[k].1));
+        }
+    }
+    out
+}
+
+fn autolink(text: &str) -> String {
+    let mut out = String::new();
+    for (j, w) in text.split(' ').enumerate() {
+        if j > 0 {
+            out.push(' ');
+        }
+        if (w.starts_with("https://") || w.starts_with("http://")) && w.len() > 8 {
+            let url = w.trim_end_matches(['.', ',', ';', ')', '>']);
+            let tail = w.get(url.len()..).unwrap_or_default();
+            out.push_str(&format!("<a href=\"{}\">{}</a>{}", escape_html(url), escape_html(url), escape_html(tail)));
+        } else {
+            out.push_str(&escape_html(w));
+        }
+    }
+    out
+}
+
+/// A printable page for a message: the headers, then the HTML (scripts removed) or the text;
+/// it asks the browser to print itself when opened.
+pub fn printable(title: &str, headers: &[(&str, String)], html: &str, text: &str) -> String {
+    let mut rows = String::new();
+    for (k, v) in headers {
+        if !v.trim().is_empty() {
+            rows.push_str(&format!("<tr><th>{}</th><td>{}</td></tr>", escape_html(k), escape_html(v)));
+        }
+    }
+    let body = if html.trim().is_empty() { text_to_html(text) } else { strip_scripts(html) };
+    format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{}</title><style>body{{font-family:Helvetica,Arial,sans-serif;font-size:14px;color:#222;margin:2em}}table{{border-collapse:collapse;margin-bottom:1.5em}}th{{text-align:left;padding:2px 12px 2px 0;color:#666;font-weight:normal}}td{{padding:2px 0}}h1{{font-size:18px}}@media print{{body{{margin:0}}}}</style></head><body><h1>{}</h1><table>{rows}</table>{body}<script>window.onload=function(){{window.print()}}</script></body></html>",
+        escape_html(title),
+        escape_html(title)
+    )
+}
+
+fn strip_scripts(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    let mut rest = html;
+    loop {
+        let lower = rest.to_ascii_lowercase();
+        let Some(i) = lower.find("<script") else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(rest.get(..i).unwrap_or_default());
+        match lower.get(i..).and_then(|r| r.find("</script>")) {
+            Some(j) => rest = rest.get(i + j + 9..).unwrap_or_default(),
+            None => break,
+        }
+    }
+    out
+}
+
 pub fn escape_html(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -536,6 +704,23 @@ mod tests {
         let text = html_to_text(html);
         assert_eq!(text, "Ciao & benvenuto!\nuno\ndue\n[https://x.it/p] link fine € è");
         assert_eq!(decode_entities("a &lt; b &unknown; c"), "a < b &unknown; c");
+    }
+
+    #[test]
+    fn compose_markup_renders_and_prints() {
+        let text = "Ciao **Luca**, ecco l'*offerta* __firmata__:\n- rete\n- switch\n1. lunedì\n2. martedì\nVedi [il sito](https://sirius.example/p) o https://x.it.\n![logo](cid:image1@mailcraft)\na * b < c";
+        let html = markup_to_html(text);
+        assert!(html.contains("Ciao <b>Luca</b>, ecco l'<i>offerta</i> <u>firmata</u>:<br>"), "{html}");
+        assert!(html.contains("<ul><li>rete</li><li>switch</li></ul><ol><li>lunedì</li><li>martedì</li></ol>"), "{html}");
+        assert!(html.contains("<a href=\"https://sirius.example/p\">il sito</a> o <a href=\"https://x.it\">https://x.it</a>."), "{html}");
+        assert!(html.contains("<img src=\"cid:image1@mailcraft\" alt=\"logo\""), "{html}");
+        assert!(html.contains("a * b &lt; c"), "a lone star stays: {html}");
+        assert!(has_markup(text) && !has_markup("plain text, nothing else") && has_markup("- a list"));
+        let page =
+            printable("Offerta", &[("Da", "Anna <a@x.it>".into()), ("A", String::new())], "<p>Ciao</p><script>alert(1)</script><b>fine</b>", "");
+        assert!(page.contains("<th>Da</th><td>Anna &lt;a@x.it&gt;</td>") && !page.contains("<th>A</th>"), "{page}");
+        assert!(page.contains("<p>Ciao</p><b>fine</b>") && !page.contains("alert(1)") && page.contains("window.print()"));
+        assert!(printable("t", &[], "", "x < y").contains("x &lt; y"));
     }
 
     #[test]

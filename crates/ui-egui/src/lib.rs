@@ -6,6 +6,7 @@
 
 mod chrome;
 mod compose;
+pub mod format;
 pub mod i18n;
 pub mod icons;
 mod list;
@@ -44,6 +45,8 @@ pub enum Request {
     SaveAttachment { name: String, data: Vec<u8> },
     /// Open a link in the browser.
     OpenUrl(String),
+    /// Print a page (a self-contained HTML document that prints itself when opened).
+    Print { title: String, html: String },
 }
 
 /// The message being written.
@@ -67,6 +70,10 @@ pub struct Compose {
     pub focus_body: bool,
     /// The account the message is sent from (its id); empty = the view's account.
     pub from_account: String,
+    /// Where the person dragged the window (from its bottom-right home).
+    pub offset: egui::Vec2,
+    /// The next picked files are images to show inline; attachments before this index are files.
+    pub inline_from: Option<usize>,
 }
 
 /// The whole app state the UI keeps on top of the engine session.
@@ -483,6 +490,40 @@ impl MailApp {
         }
     }
 
+    /// Prints the open message: a self-contained page handed to the host.
+    pub fn print_open_message(&mut self) {
+        let Some((mailbox, uid)) = self.session.view().open.clone() else { return };
+        let Some(m) = self.open_state().and_then(|st| st.message(&mailbox, uid)).cloned() else {
+            self.status = self.tr("Wait for the message to load").to_string();
+            return;
+        };
+        let italian = self.italian();
+        let headers = [
+            (self.tr("From"), core::message::join_addresses(&m.envelope.from)),
+            (self.tr("To"), core::message::join_addresses(&m.envelope.to)),
+            (self.tr("Cc"), core::message::join_addresses(&m.envelope.cc)),
+            (self.tr("Date"), core::message::time::long(m.envelope.date, italian)),
+        ];
+        let title = if m.envelope.subject.trim().is_empty() { "(no subject)".to_string() } else { m.envelope.subject.clone() };
+        let html = core::mime::printable(&title, &headers, &m.html, &m.text);
+        self.requests.push(Request::Print { title, html });
+    }
+
+    /// Prints the message being written.
+    pub fn print_compose(&mut self) {
+        let Some(c) = self.compose.clone() else { return };
+        let from = self
+            .session
+            .account(&c.from_account)
+            .or_else(|| self.session.account(&self.session.view().account))
+            .map(|a| a.email.clone())
+            .unwrap_or_default();
+        let headers = [(self.tr("From"), from), (self.tr("To"), c.to.clone()), (self.tr("Cc"), c.cc.clone())];
+        let title = if c.subject.trim().is_empty() { self.tr("New message").to_string() } else { c.subject.clone() };
+        let html = core::mime::printable(&title, &headers, &core::mime::markup_to_html(&c.body), "");
+        self.requests.push(Request::Print { title, html });
+    }
+
     /// Replaces the recipient being typed (the text after the last comma) with `display`.
     pub fn complete_recipient(value: &mut String, display: &str) {
         let keep = value.rfind(',').map(|i| value[..=i].to_string()).unwrap_or_default();
@@ -570,6 +611,10 @@ impl MailApp {
 
     fn compose_params(&self, c: &Compose) -> Value {
         let mut v = json!({"to": c.to, "cc": c.cc, "bcc": c.bcc, "subject": c.subject, "body": c.body});
+        // Formatting or inline images: the body also goes out as HTML.
+        if core::mime::has_markup(&c.body) || c.attachments.iter().any(|a| !a.cid.is_empty()) {
+            v["html"] = json!(core::mime::markup_to_html(&c.body));
+        }
         if !c.from_account.is_empty() {
             v["account"] = json!(c.from_account);
         }
@@ -589,7 +634,10 @@ impl MailApp {
         }
         if !c.attachments.is_empty() {
             v["attachments"] = json!(
-                c.attachments.iter().map(|a| json!({"name": a.name, "mime": a.mime, "data": core::mime::base64_encode(&a.data)})).collect::<Vec<_>>()
+                c.attachments
+                    .iter()
+                    .map(|a| json!({"name": a.name, "mime": a.mime, "data": core::mime::base64_encode(&a.data), "cid": a.cid}))
+                    .collect::<Vec<_>>()
             );
         }
         v

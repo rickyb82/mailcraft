@@ -38,6 +38,9 @@ triage and answer your mail. Part of the *craft* family (`gridcraft`, `ideacraft
   (`MAILCRAFT_BUILTIN_GOOGLE_CLIENT_ID` at build time), so users just press *Sign in with
   Google*; otherwise the client is pasted in Settings, `mailcraft-cli oauth`, or environment
   variables. App passwords still work. See [`docs/oauth.md`](docs/oauth.md).
+- **Write like on Gmail** — a formatting bar (bold, italic, underline, lists, links, inline
+  images) on a light markup that goes out as text + HTML; a print button for any message or
+  draft; the compose window drags anywhere so what is behind it stays readable.
 - **Signatures with a logo, recipients that complete themselves** — paste the HTML of your
   signature (logo, bold, links): messages go out as text + HTML with the logo inline, replies
   and forwards included. While you type a recipient, the people seen in your mail or written

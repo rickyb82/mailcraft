@@ -448,8 +448,22 @@ impl Session {
             d.body = format!("{}\n\n-- \n{text_sig}", d.body.trim_end());
         }
         // An HTML signature makes the message HTML (with a text alternative): logo, bold, links.
-        if with_signature && !account.signature_html.trim().is_empty() && d.html.trim().is_empty() {
-            d.html = format!("{}<br><br>-- <br>{}", mime::text_to_html(note.trim_end()), account.signature_html.trim());
+        // A body written with the compose markup is HTML already and gets the signature too.
+        let html_sig = if !account.signature_html.trim().is_empty() {
+            account.signature_html.trim().to_string()
+        } else if !text_sig.is_empty() {
+            mime::text_to_html(&text_sig)
+        } else {
+            String::new()
+        };
+        if with_signature && !html_sig.is_empty() {
+            if !d.html.trim().is_empty() {
+                if !d.html.contains(&html_sig) {
+                    d.html = format!("{}<br><br>-- <br>{html_sig}", d.html.trim_end());
+                }
+            } else if !account.signature_html.trim().is_empty() {
+                d.html = format!("{}<br><br>-- <br>{html_sig}", mime::text_to_html(note.trim_end()));
+            }
         }
         mime::inline_data_images(&mut d);
         let from = Address::new(account.from_name(), &account.email);
@@ -493,7 +507,7 @@ impl Session {
                         name: a.get("name").and_then(Value::as_str).unwrap_or("attachment").to_string(),
                         mime: a.get("mime").and_then(Value::as_str).unwrap_or("application/octet-stream").to_string(),
                         data,
-                        cid: String::new(),
+                        cid: a.get("cid").and_then(Value::as_str).unwrap_or_default().replace(['<', '>', '\r', '\n', ' '], ""),
                     });
                 }
             }

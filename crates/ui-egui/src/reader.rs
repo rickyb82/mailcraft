@@ -79,6 +79,9 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
             }
             let mv = icon_button(ui, t, Icon::Move, app.tr("Move to"), true, false);
             crate::list::move_menu(app, &mv);
+            if icon_button(ui, t, Icon::Print, app.tr("Print"), true, false).clicked() {
+                app.print_open_message();
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if icon_button(ui, t, Icon::Close, app.tr("Close"), true, false).clicked() {
                     app.close_reader();

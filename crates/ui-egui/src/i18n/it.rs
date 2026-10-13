@@ -125,6 +125,17 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Save draft" => "Salva bozza",
         "Discard" => "Elimina",
         "Attach files" => "Allega file",
+        "Print" => "Stampa",
+        "Bold" => "Grassetto",
+        "Italic" => "Corsivo",
+        "Underline" => "Sottolineato",
+        "Bulleted list" => "Elenco puntato",
+        "Numbered list" => "Elenco numerato",
+        "Insert link" => "Inserisci link",
+        "Insert image" => "Inserisci immagine",
+        "Formatting: **bold**, *italic*, __underline__, lists with - or 1., links [text](url); the message goes out as text and HTML" => {
+            "Formattazione: **grassetto**, *corsivo*, __sottolineato__, elenchi con - o 1., link [testo](url); il messaggio parte come testo e HTML"
+        }
         "Attachments" => "Allegati",
         "Save" => "Salva",
         "Add at least one recipient" => "Aggiungi almeno un destinatario",

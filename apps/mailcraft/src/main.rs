@@ -42,20 +42,34 @@ impl App {
                 }
                 Request::OpenUrl(url) => {
                     if url.starts_with("http://") || url.starts_with("https://") {
-                        let _ = std::process::Command::new(if cfg!(target_os = "macos") {
-                            "open"
-                        } else if cfg!(windows) {
-                            "cmd"
-                        } else {
-                            "xdg-open"
-                        })
-                        .args(if cfg!(windows) { vec!["/C", "start", "", url.as_str()] } else { vec![url.as_str()] })
-                        .spawn();
+                        open_with_system(&url);
+                    }
+                }
+                Request::Print { title, html } => {
+                    // A page that prints itself, opened in the browser.
+                    let name = format!("mailcraft-print-{}.html", mailcraft_ui_egui::core::message::time::now());
+                    let path = std::env::temp_dir().join(name);
+                    match std::fs::write(&path, html) {
+                        Ok(()) => open_with_system(&path.display().to_string()),
+                        Err(e) => self.0.status = format!("{title}: {e}"),
                     }
                 }
             }
         }
     }
+}
+
+/// Opens a URL or a file with the system's default application.
+fn open_with_system(target: &str) {
+    let _ = std::process::Command::new(if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(windows) {
+        "cmd"
+    } else {
+        "xdg-open"
+    })
+    .args(if cfg!(windows) { vec!["/C", "start", "", target] } else { vec![target] })
+    .spawn();
 }
 
 impl eframe::App for App {

@@ -117,6 +117,19 @@ mod web {
                             let _ = w.open_with_url_and_target(&url, "_blank");
                         }
                     }
+                    Request::Print { html, .. } => {
+                        // A page that prints itself, opened in a new tab.
+                        let parts = js_sys::Array::new();
+                        parts.push(&eframe::wasm_bindgen::JsValue::from_str(&html));
+                        let options = web_sys::BlobPropertyBag::new();
+                        options.set_type("text/html");
+                        if let Ok(blob) = web_sys::Blob::new_with_str_sequence_and_options(&parts, &options)
+                            && let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob)
+                            && let Some(w) = web_sys::window()
+                        {
+                            let _ = w.open_with_url_and_target(&url, "_blank");
+                        }
+                    }
                 }
             }
         }
