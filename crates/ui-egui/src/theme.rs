@@ -83,7 +83,8 @@ pub fn apply(ctx: &egui::Context, t: &Tokens) {
     let mut visuals = if t.dark { Visuals::dark() } else { Visuals::light() };
     visuals.panel_fill = t.chrome;
     visuals.window_fill = t.card;
-    visuals.extreme_bg_color = t.card;
+    // Text fields: the panel tone with a border, so they show on cards too.
+    visuals.extreme_bg_color = t.panel;
     visuals.faint_bg_color = t.panel;
     visuals.window_stroke = Stroke::new(1.0, t.border);
     visuals.window_corner_radius = CornerRadius::same(12);
@@ -105,11 +106,11 @@ pub fn apply(ctx: &egui::Context, t: &Tokens) {
     visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, t.ui_text);
     visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
     visuals.widgets.inactive.bg_fill = t.panel;
-    visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+    visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, t.border);
     visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, t.ui_text);
     visuals.widgets.hovered.weak_bg_fill = t.hover;
     visuals.widgets.hovered.bg_fill = t.hover;
-    visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+    visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, t.border);
     visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, t.ui_text);
     visuals.widgets.active.weak_bg_fill = t.active;
     visuals.widgets.active.bg_fill = t.active;

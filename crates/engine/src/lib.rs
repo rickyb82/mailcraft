@@ -732,7 +732,7 @@ impl Session {
                 }
                 Ok(json!({"mailbox": mailbox, "query": query.text, "envelopes": list.iter().map(envelope_json).collect::<Vec<_>>()}))
             }
-            Output::Sent { message_id, copied_to } => {
+            Output::Sent { message_id, copied_to, copy_error } => {
                 if let JobKind::Send { answered: Some((mb, uid)), .. } | JobKind::Respond { mailbox: mb, uid, .. } = &kind {
                     state.apply_flag(mb, &[*uid], FlagChange::Answered(true));
                 }
@@ -740,13 +740,27 @@ impl Session {
                     state.remove(mb, &[*uid]);
                 }
                 if let Some(folder) = &copied_to {
+                    if !state.mailboxes.iter().any(|m| m.path == *folder) {
+                        // The Sent folder was just created: list it.
+                        let _ = self.submit(command, account, JobKind::Mailboxes);
+                    }
                     let _ = self.submit(command, account, JobKind::Envelopes { mailbox: folder.clone(), page: Page::new(0, page_size) });
                 }
-                Ok(json!({"sent": true, "message_id": message_id, "copied_to": copied_to}))
+                let mut v = json!({"sent": true, "message_id": message_id, "copied_to": copied_to});
+                if let Some(e) = copy_error {
+                    v["copy_error"] = json!(e);
+                }
+                Ok(v)
             }
             Output::Created { path } => {
                 let _ = self.submit(command, account, JobKind::Mailboxes);
                 Ok(json!({"created": path}))
+            }
+            Output::Subscribed { path, subscribed } => {
+                if let Some(m) = state.mailboxes.iter_mut().find(|m| m.path == path) {
+                    m.subscribed = subscribed;
+                }
+                Ok(json!({"path": path, "subscribed": subscribed}))
             }
             Output::Tested { mailboxes, smtp } => Ok(json!({
                 "ok": smtp.is_ok(),
@@ -849,7 +863,7 @@ pub fn message_json(m: &Message) -> Value {
 
 pub fn mailbox_json(m: &mailcraft_core::mailbox::Mailbox, italian: bool) -> Value {
     let label = if m.role == Role::Other { m.name.clone() } else { m.role.label(italian).to_string() };
-    json!({"path": m.path, "name": m.name, "label": label, "role": m.role.name(), "unread": m.unread, "total": m.total, "no_select": m.no_select})
+    json!({"path": m.path, "name": m.name, "label": label, "role": m.role.name(), "unread": m.unread, "total": m.total, "no_select": m.no_select, "subscribed": m.subscribed})
 }
 
 /// An account as commands return it (never the password).
@@ -1001,6 +1015,52 @@ mod tests {
         s.execute("account.remove", &json!({"id": "mario-sirius-example-it"})).unwrap();
         assert_eq!(s.config().accounts.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn closes_subscribes_and_copies_sent_mail_without_a_sent_folder() {
+        // A server without a Sent folder: the copy creates it.
+        let mock = MockBackend::new();
+        mock.put_draft(
+            "INBOX",
+            &mailcraft_core::message::Address::new("Anna", "anna@example.it"),
+            &mailcraft_core::message::Draft {
+                to: vec![mailcraft_core::message::Address::new("Riccardo", "riccardo@example.it")],
+                subject: "Ciao".into(),
+                body: "testo".into(),
+                ..Default::default()
+            },
+            1_700_000_000,
+            mailcraft_core::message::Flags::default(),
+        );
+        let mut s = session(&mock);
+        s.run_blocking("mail.sync", json!({})).unwrap();
+        let before = s.current().unwrap().mailboxes.len();
+        // Open then close.
+        s.run_blocking("mail.open", json!({"uid": 1})).unwrap();
+        assert!(s.view().open.is_some());
+        s.execute("mail.close", &json!({})).unwrap();
+        assert!(s.view().open.is_none() && s.view().open_account.is_empty());
+        // Hide a folder from the navigation.
+        let v = s.run_blocking("mailbox.subscribe", json!({"path": "Junk", "subscribed": false})).unwrap();
+        assert_eq!(v["subscribed"], false);
+        assert!(!s.current().unwrap().mailbox("Junk").unwrap().subscribed);
+        assert!(mock.log().iter().any(|l| l == "subscribe Junk false"));
+        s.run_blocking("mail.sync", json!({})).unwrap();
+        assert!(!s.current().unwrap().mailbox("Junk").unwrap().subscribed, "the server remembers");
+        // No Sent folder at all: it is created on the first send.
+        s.execute("account.update", &json!({"folders": {"sent": "Posta inviata"}})).unwrap();
+        let v = s.run_blocking("mail.send", json!({"to": "luca@example.com", "subject": "Prova", "body": "Ciao"})).unwrap();
+        assert_eq!(v["copied_to"], "Posta inviata", "{v}");
+        assert_eq!(mock.count("Posta inviata"), 1);
+        for _ in 0..200 {
+            if s.jobs_pending() == 0 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+            let _ = s.pump();
+        }
+        assert_eq!(s.current().unwrap().mailboxes.len(), before + 1, "the new folder is listed");
     }
 
     #[test]

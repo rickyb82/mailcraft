@@ -1,0 +1,11 @@
+/home/user/mailcraft/target-web/wasm32-unknown-unknown/release/deps/js_sys-2787a50f22920dc0.d: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/jspi.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/queue.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/task/singlethread.rs
+
+/home/user/mailcraft/target-web/wasm32-unknown-unknown/release/deps/libjs_sys-2787a50f22920dc0.rlib: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/jspi.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/queue.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/task/singlethread.rs
+
+/home/user/mailcraft/target-web/wasm32-unknown-unknown/release/deps/libjs_sys-2787a50f22920dc0.rmeta: /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/lib.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/mod.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/jspi.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/queue.rs /root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/task/singlethread.rs
+
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/lib.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/mod.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/jspi.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/queue.rs:
+/root/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/js-sys-0.3.106/src/futures/task/singlethread.rs:

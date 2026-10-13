@@ -160,7 +160,7 @@ pub fn show(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                         let d = s.delimiter.clone();
                         s.mailboxes
                             .iter()
-                            .filter(|m| !shown.contains(&m.path) && m.role != Role::Inbox)
+                            .filter(|m| !shown.contains(&m.path) && m.role != Role::Inbox && m.subscribed)
                             .map(|m| (m.path.clone(), m.name.clone(), m.unread, m.depth(&d), m.no_select))
                             .collect()
                     })

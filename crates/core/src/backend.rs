@@ -136,6 +136,8 @@ pub trait MailBackend: Send {
     fn append(&mut self, mailbox: &str, raw: &[u8], flags: Flags) -> Result<Option<u32>>;
     fn search(&mut self, mailbox: &str, query: &SearchQuery, page: Page) -> Result<Vec<Envelope>>;
     fn create_mailbox(&mut self, path: &str) -> Result<()>;
+    /// Subscribes to (or unsubscribes from) a folder: what the navigation shows.
+    fn subscribe(&mut self, path: &str, subscribed: bool) -> Result<()>;
     /// Sends a raw message through SMTP.
     fn send(&mut self, from: &str, to: &[String], raw: &[u8]) -> Result<()>;
     /// Checks that the SMTP server accepts the account (connection and login), without sending.

@@ -31,6 +31,12 @@ pub struct AccountForm {
     pub trust_invalid_certs: bool,
     pub save_sent: bool,
     pub notes: Vec<String>,
+    /// The special folders' IMAP paths (empty = detected by name).
+    pub sent: String,
+    pub drafts: String,
+    pub trash: String,
+    pub spam: String,
+    pub archive: String,
 }
 
 impl AccountForm {
@@ -56,6 +62,11 @@ impl AccountForm {
             trust_invalid_certs: a.trust_invalid_certs,
             save_sent: a.save_sent,
             notes: Vec::new(),
+            sent: a.folders.sent.clone(),
+            drafts: a.folders.drafts.clone(),
+            trash: a.folders.trash.clone(),
+            spam: a.folders.spam.clone(),
+            archive: a.folders.archive.clone(),
         }
     }
 
@@ -91,6 +102,7 @@ impl AccountForm {
             "signature": self.signature,
             "trust_invalid_certs": self.trust_invalid_certs,
             "save_sent": self.save_sent,
+            "folders": {"sent": self.sent, "drafts": self.drafts, "trash": self.trash, "spam": self.spam, "archive": self.archive},
         });
         if !self.password.is_empty() {
             v["password"] = json!(self.password);
@@ -110,6 +122,8 @@ pub struct SettingsState {
     pub reload: bool,
     /// The server URL being typed (web app).
     pub server_draft: Option<String>,
+    /// The name of the folder being created.
+    pub new_folder: String,
 }
 
 fn section(ui: &mut egui::Ui, t: &Tokens, text: &str) {
@@ -172,24 +186,39 @@ fn accounts_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
         let (unread, error, last) =
             app.session.state(&a.id).map_or((0, None, 0), |s| (s.by_role(Role::Inbox).map_or(0, |m| m.unread), s.error.clone(), s.last_sync));
         let frame = egui::Frame::NONE.fill(t.card).stroke(Stroke::new(1.0, t.border)).corner_radius(10).inner_margin(12);
-        let resp = frame.show(ui, |ui| {
+        frame.show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // The buttons take the right end; the text is clipped to what is left of it.
+            let buttons_w = 300.0_f32;
+            let text_w = (ui.available_width() - 36.0 - buttons_w - 24.0).max(160.0);
             ui.horizontal(|ui| {
                 avatar(ui, t, &a.name, color_for(&a.email, &a.color), 36.0);
                 ui.vertical(|ui| {
+                    ui.set_max_width(text_w);
                     ui.spacing_mut().item_spacing.y = 1.0;
-                    ui.label(RichText::new(&a.name).strong().color(t.ui_text));
-                    ui.label(RichText::new(format!("{} · IMAP {} · SMTP {}", a.email, a.imap.describe(), a.smtp.describe())).small().color(t.muted));
+                    ui.add(egui::Label::new(RichText::new(&a.name).strong().color(t.ui_text)).truncate());
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(format!("{} · IMAP {} · SMTP {}", a.email, a.imap.describe(), a.smtp.describe())).small().color(t.muted),
+                        )
+                        .truncate(),
+                    );
                     let when = if last > 0 { mailcraft_engine::core::message::time::long(last, app.italian()) } else { app.tr("never").to_string() };
                     match error {
-                        Some(e) => ui.label(
-                            RichText::new(format!("{}: {}", app.tr("Error"), app.language.tr_message(&e)))
-                                .small()
-                                .color(Color32::from_rgb(0xe5, 0x48, 0x4d)),
+                        Some(e) => ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("{}: {}", app.tr("Error"), app.language.tr_message(&e)))
+                                    .small()
+                                    .color(Color32::from_rgb(0xe5, 0x48, 0x4d)),
+                            )
+                            .truncate(),
                         ),
-                        None => {
-                            ui.label(RichText::new(format!("{}: {when} · {} {unread}", app.tr("Last sync"), app.tr("Inbox"))).small().color(t.muted))
-                        }
+                        None => ui.add(
+                            egui::Label::new(
+                                RichText::new(format!("{}: {when} · {} {unread}", app.tr("Last sync"), app.tr("Inbox"))).small().color(t.muted),
+                            )
+                            .truncate(),
+                        ),
                     };
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -204,7 +233,6 @@ fn accounts_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
                 });
             });
         });
-        let _ = resp;
         ui.add_space(6.0);
     }
     if app.settings.editing.is_none() && icon_text_button(ui, t, Icon::Plus, app.tr("Add account"), true).clicked() {
@@ -255,6 +283,7 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
         });
         ui.checkbox(&mut f.save_sent, app.tr("Copy sent mail to the Sent folder"));
         ui.checkbox(&mut f.trust_invalid_certs, app.tr("Accept invalid certificates (local bridges, self-hosted servers)"));
+        folders_section(app, ui, t, &mut f);
         if !f.notes.is_empty() {
             ui.add_space(6.0);
             ui.label(RichText::new(app.tr("Provider notes")).small().strong().color(t.muted));
@@ -331,6 +360,117 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
         _ => {}
     }
     app.settings.editing = Some(f);
+}
+
+/// The account's folders: which ones the navigation shows (IMAP subscription), the special
+/// folders, a new folder.
+fn folders_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, f: &mut AccountForm) {
+    ui.add_space(12.0);
+    ui.label(RichText::new(app.tr("Folders on the server")).strong().color(t.ui_text));
+    let Some(id) = f.id.clone() else {
+        ui.label(RichText::new(app.tr("Save the account first: its folders are listed here, with the ones to show in the navigation and the special folders (sent, drafts, trash, spam, archive).")).small().color(t.muted));
+        return;
+    };
+    ui.label(RichText::new(app.tr("Unchecked folders stay on the server but leave the navigation (IMAP subscription). The special folders are found by name; pick them here when the server names them differently.")).small().color(t.muted));
+    let italian = app.italian();
+    let folders: Vec<(String, String, Role, bool, bool, usize)> = app
+        .session
+        .state(&id)
+        .map(|s| {
+            let d = s.delimiter.clone();
+            s.mailboxes.iter().map(|m| (m.path.clone(), m.name.clone(), m.role, m.subscribed, m.no_select, m.depth(&d))).collect()
+        })
+        .unwrap_or_default();
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui.button(app.tr("Refresh folders")).clicked() {
+            app.run("mail.sync", json!({"account": id}));
+            app.settings.result = app.tr("Loading…").to_string();
+        }
+        if app.session.jobs_pending() > 0 {
+            ui.add(egui::Spinner::new().size(14.0).color(t.accent));
+        }
+    });
+    if folders.is_empty() {
+        ui.label(RichText::new(app.tr("Loading…")).small().color(t.muted));
+    }
+    let inner = egui::Frame::NONE.fill(t.panel).stroke(Stroke::new(1.0, t.border)).corner_radius(8).inner_margin(8);
+    inner.show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        egui::ScrollArea::vertical().id_salt("folders").max_height(260.0).auto_shrink([false, true]).show(ui, |ui| {
+            for (path, name, role, subscribed, no_select, depth) in &folders {
+                ui.horizontal(|ui| {
+                    ui.add_space((*depth as f32 * 14.0).min(56.0));
+                    let mut on = *subscribed;
+                    let inbox = *role == Role::Inbox;
+                    let tip = app.tr(if on { "Shown" } else { "Hidden" }).to_string();
+                    if ui.add_enabled(!inbox, egui::Checkbox::new(&mut on, "")).on_hover_text(tip).changed() {
+                        app.run("mailbox.subscribe", json!({"account": id, "path": path, "subscribed": on}));
+                    }
+                    let (r, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
+                    icons::paint(ui.painter(), r, icon_for(*role), if *no_select { t.muted } else { t.ui_text });
+                    ui.label(RichText::new(name).color(if *no_select { t.muted } else { t.ui_text }));
+                    if *role != Role::Other {
+                        ui.label(RichText::new(role.label(italian)).small().color(t.accent));
+                    }
+                    if *depth > 0 {
+                        ui.label(RichText::new(path).small().color(t.muted));
+                    }
+                });
+            }
+        });
+    });
+    ui.add_space(6.0);
+    egui::Grid::new("special-folders").num_columns(2).spacing(vec2(12.0, 6.0)).min_col_width(200.0).show(ui, |ui| {
+        let paths: Vec<String> = folders.iter().filter(|(.., no_select, _)| !no_select).map(|(p, ..)| p.clone()).collect();
+        for (label, role, value) in [
+            ("Sent folder", Role::Sent, &mut f.sent),
+            ("Drafts folder", Role::Drafts, &mut f.drafts),
+            ("Trash folder", Role::Trash, &mut f.trash),
+            ("Spam folder", Role::Spam, &mut f.spam),
+            ("Archive folder", Role::Archive, &mut f.archive),
+        ] {
+            ui.label(RichText::new(app.tr(label)).color(t.muted));
+            let detected = folders.iter().find(|(_, _, r, ..)| *r == role).map(|(p, ..)| p.clone());
+            let auto = match &detected {
+                Some(p) => format!("{} ({p})", app.tr("Automatic")),
+                None => app.tr("Automatic").to_string(),
+            };
+            let shown = if value.is_empty() { auto.clone() } else { value.clone() };
+            egui::ComboBox::from_id_salt(("special", label)).selected_text(shown).width(360.0).show_ui(ui, |ui| {
+                ui.selectable_value(value, String::new(), auto);
+                for p in &paths {
+                    ui.selectable_value(value, p.clone(), p);
+                }
+            });
+            ui.end_row();
+        }
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(app.tr("New folder")).color(t.muted));
+        let mut name = app.settings.new_folder.clone();
+        if ui.add(egui::TextEdit::singleline(&mut name).desired_width(240.0)).changed() {
+            app.settings.new_folder = name.clone();
+        }
+        if ui.add_enabled(!name.trim().is_empty(), egui::Button::new(app.tr("Create"))).clicked() {
+            app.run("mailbox.create", json!({"account": id, "name": name.trim()}));
+            app.settings.new_folder.clear();
+        }
+    });
+}
+
+fn icon_for(role: Role) -> Icon {
+    match role {
+        Role::Inbox => Icon::Inbox,
+        Role::Sent => Icon::Sent,
+        Role::Drafts => Icon::Drafts,
+        Role::Trash => Icon::Trash,
+        Role::Spam => Icon::Spam,
+        Role::Archive | Role::All => Icon::Archive,
+        Role::Starred => Icon::Star,
+        _ => Icon::Folder,
+    }
 }
 
 fn server_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {

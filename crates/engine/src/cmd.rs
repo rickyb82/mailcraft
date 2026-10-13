@@ -137,6 +137,15 @@ pub const COMMANDS: &[Command] = &[
     ),
     c("draft.discard", "Discard Draft", "Compose › Discard", "", "{uid, mailbox?}", true),
     c("mailbox.create", "New Folder", "Mail › New Folder", "", "{name, account?}", true),
+    c(
+        "mailbox.subscribe",
+        "Show Folder",
+        "Mail › Show Folder",
+        "",
+        "{path, subscribed?: bool (default true), account?} → IMAP SUBSCRIBE/UNSUBSCRIBE; unsubscribed folders leave the navigation",
+        true,
+    ),
+    c("mail.close", "Close Message", "Mail › Close", "Escape", "{} → closes the open message", false),
     c("selection.set", "Select", "Edit › Select", "", "{uids: [...]}", false),
     c("selection.all", "Select All", "Edit › Select All", "Cmd+A", "{}", false),
     c("selection.clear", "Clear Selection", "Edit › Clear Selection", "Escape", "{}", false),
@@ -274,6 +283,24 @@ impl Session {
             }
         }
         Ok("INBOX".into())
+    }
+
+    /// Where a copy of sent mail goes: the configured or detected Sent folder, else a new
+    /// `Sent` (under `INBOX` when the server keeps every folder there); `None` when the account
+    /// does not keep copies.
+    fn sent_folder(&self, acc: &str, account: &Account) -> Option<String> {
+        if !account.save_sent {
+            return None;
+        }
+        if let Some(f) = self.folder_for(acc, Role::Sent) {
+            return Some(f);
+        }
+        let st = self.store.get(acc)?;
+        let delimiter = if st.delimiter.is_empty() { "/".to_string() } else { st.delimiter.clone() };
+        let prefix = format!("INBOX{delimiter}");
+        let under_inbox = st.mailboxes.iter().any(|m| m.path.starts_with(&prefix))
+            && st.mailboxes.iter().all(|m| m.path.eq_ignore_ascii_case("INBOX") || m.path.starts_with(&prefix));
+        Some(if under_inbox { format!("{prefix}Sent") } else { "Sent".to_string() })
     }
 
     /// The role asked for (`role` param) or the unified view's.
@@ -818,7 +845,7 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
                 return Err(Error::Param("`to` is required".into()));
             }
             let (raw, to) = s.build_outgoing(&account, &draft, p::opt_bool(prm, "signature").unwrap_or(true))?;
-            let copy_to = if account.save_sent { s.folder_for(&acc, Role::Sent) } else { None };
+            let copy_to = s.sent_folder(&acc, &account);
             let answered = p::opt_u32(prm, "reply_to_uid").map(|u| (p::opt_str(prm, "reply_mailbox").unwrap_or("INBOX").to_string(), u));
             let delete_draft = s.folder_for(&acc, Role::Drafts).zip(draft.draft_uid);
             let job = s.submit(id, &acc, JobKind::Send { from: account.email.clone(), to, raw, copy_to, answered, delete_draft })?;
@@ -842,7 +869,7 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             if id == "mail.reply" && body.trim().is_empty() {
                 return Err(Error::Param("`body` is required".into()));
             }
-            let copy_to = if account.save_sent { s.folder_for(&acc, Role::Sent) } else { None };
+            let copy_to = s.sent_folder(&acc, &account);
             let kind = JobKind::Respond {
                 mailbox,
                 uid,
@@ -888,6 +915,21 @@ pub(crate) fn run(s: &mut Session, id: &str, prm: &Value) -> Result<Value> {
             }
             let job = s.submit(id, &acc, JobKind::Delete { mailbox: folder, uids: vec![uid] })?;
             Ok(json!({"job": job}))
+        }
+        "mailbox.subscribe" => {
+            let acc = s.account_id(prm)?;
+            let path = p::str(prm, "path").or_else(|_| p::str(prm, "mailbox"))?.to_string();
+            if path.len() > 500 || path.contains(['\r', '\n']) {
+                return Err(Error::Param("invalid folder name".into()));
+            }
+            let subscribed = p::opt_bool(prm, "subscribed").unwrap_or(true);
+            let job = s.submit(id, &acc, JobKind::Subscribe { path, subscribed })?;
+            Ok(json!({"job": job}))
+        }
+        "mail.close" => {
+            s.view.open = None;
+            s.view.open_account.clear();
+            Ok(json!({"open": Value::Null}))
         }
         "mailbox.create" => {
             let acc = s.account_id(prm)?;

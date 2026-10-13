@@ -136,6 +136,8 @@ fn tools() -> Value {
          "inputSchema": {"type": "object", "properties": {"uids": uids, "to": {"type": "string"}, "account": account, "mailbox": mailbox}, "required": ["uids", "to"]}},
         {"name": "save_draft", "description": "Save a draft in the Drafts folder (draft_uid replaces an earlier one).",
          "inputSchema": {"type": "object", "properties": {"to": addresses, "cc": addresses, "bcc": addresses, "subject": {"type": "string"}, "body": {"type": "string"}, "draft_uid": uid, "account": account}}},
+        {"name": "subscribe_folder", "description": "Show or hide a folder in the navigation (IMAP SUBSCRIBE/UNSUBSCRIBE); hidden folders stay on the server.",
+         "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "description": "IMAP path from list_mailboxes"}, "subscribed": {"type": "boolean", "description": "true = shown (default)"}, "account": account}, "required": ["path"]}},
         {"name": "create_folder", "description": "Create an IMAP folder.",
          "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "account": account}, "required": ["name"]}},
         {"name": "list_commands", "description": "Every engine command with its parameters.",
@@ -443,11 +445,12 @@ impl Server {
                         l.iter()
                             .map(|m| {
                                 format!(
-                                    "{} [{}] unread {} / {}",
+                                    "{} [{}] unread {} / {}{}",
                                     m["path"].as_str().unwrap_or(""),
                                     m["role"].as_str().unwrap_or(""),
                                     m["unread"],
-                                    m["total"]
+                                    m["total"],
+                                    if m["subscribed"] == false { " (hidden)" } else { "" }
                                 )
                             })
                             .collect()
@@ -546,6 +549,7 @@ impl Server {
             }
             "save_draft" => self.run("draft.save", self.pass_through(args, &["to", "cc", "bcc", "subject", "body", "draft_uid", "account"])),
             "create_folder" => self.run("mailbox.create", self.pass_through(args, &["name", "account"])),
+            "subscribe_folder" => self.run("mailbox.subscribe", self.pass_through(args, &["path", "subscribed", "account"])),
             "list_commands" => Ok(
                 json!({"commands": COMMANDS.iter().map(|c| json!({"id": c.id, "label": c.label, "menu": c.menu, "shortcut": c.shortcut, "params": c.params, "network": c.network})).collect::<Vec<_>>()}),
             ),

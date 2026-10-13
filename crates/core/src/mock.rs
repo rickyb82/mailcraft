@@ -23,6 +23,7 @@ struct Folder {
     attributes: Vec<String>,
     next_uid: u32,
     messages: Vec<Stored>,
+    unsubscribed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -52,7 +53,12 @@ impl MockBackend {
             {
                 s.folders.insert(
                     name.to_string(),
-                    Folder { attributes: if attr.is_empty() { vec![] } else { vec![attr.to_string()] }, next_uid: 1, messages: vec![] },
+                    Folder {
+                        attributes: if attr.is_empty() { vec![] } else { vec![attr.to_string()] },
+                        next_uid: 1,
+                        messages: vec![],
+                        unsubscribed: false,
+                    },
                 );
             }
         });
@@ -346,6 +352,7 @@ impl MailBackend for MockBackend {
                     let mut m = Mailbox::new(path, &f.attributes, Some("/"));
                     m.total = f.messages.len() as u32;
                     m.unread = f.messages.iter().filter(|x| !x.flags.seen).count() as u32;
+                    m.subscribed = !f.unsubscribed;
                     m
                 })
                 .collect();
@@ -456,6 +463,16 @@ impl MailBackend for MockBackend {
         self.with(|s| {
             Self::require(s)?;
             s.folders.entry(path.to_string()).or_insert_with(|| Folder { next_uid: 1, ..Folder::default() });
+            Ok(())
+        })
+    }
+
+    fn subscribe(&mut self, path: &str, subscribed: bool) -> Result<()> {
+        self.with(|s| {
+            Self::require(s)?;
+            s.log.push(format!("subscribe {path} {subscribed}"));
+            let f = s.folders.get_mut(path).ok_or_else(|| Error::NoMailbox(path.to_string()))?;
+            f.unsubscribed = !subscribed;
             Ok(())
         })
     }

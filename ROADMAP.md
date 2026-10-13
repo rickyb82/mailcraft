@@ -29,6 +29,9 @@
   (`account: "*"`): every account's inbox, starred, sent, drafts… merged newest first with an
   account chip per row, cross-account search, actions routed to the message's account, a
   *From* selector in the compose window.
+- Folders: IMAP subscriptions (LSUB/SUBSCRIBE, `mailbox.subscribe`), special-folder choice and
+  new folders in the account form; sent mail copied to a Sent folder created when missing;
+  `mail.close`.
 
 ## Next (0.2)
 
@@ -52,4 +55,5 @@
 | 2026-10-13 | 0.1: model, autoconfig, IMAP/SMTP transport with in-process test servers, engine with commands and cache, Gmail-style egui UI, MCP server with configuration prompts, CLI |
 | 2026-10-13 | Web app: `MailSession` abstraction, snapshots by revision, `mailcraft-remote`, `mailcraft-cli serve` (HTTP API, static files, token), `apps/mailcraft-web` on GitHub Pages |
 | 2026-10-13 | Multi-user server for frameworks: `--users-dir`, service and per-user tokens, `/api/users`, MCP over the server (`mcp --server`), Dockerfile and compose, deploy guide |
+| 2026-10-13 | Folder subscriptions and special-folder choice in the account form, Sent folder created when the server lacks one (copy failures reported), `mail.close` (the reader's X works on the web too), settings layout fixes (visible fields, no overlap) |
 | 2026-10-13 | Account switcher under the avatar; unified inbox across accounts (`account: "*"` in `mail.select`/`mail.list`/`mail.search`, account-tagged envelopes, *All accounts* in the navigation and the switcher, account chips in the list, *From* selector when composing) |

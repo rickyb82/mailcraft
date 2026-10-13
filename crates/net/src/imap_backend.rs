@@ -282,9 +282,17 @@ impl MailBackend for ImapSmtpBackend {
         })?;
         let delimiter = names.iter().find_map(|(_, _, d)| d.clone()).unwrap_or_else(|| "/".to_string());
         self.delimiter = delimiter.clone();
+        // Subscriptions (LSUB): a server that answers nothing, or does not support it, shows
+        // every folder; otherwise only the subscribed ones are shown in the navigation.
+        let subscribed: Vec<String> = self
+            .call(|s| s.lsub(Some(""), Some("*")).map(|l| l.iter().take(limits::MAX_MAILBOXES).map(|n| n.name().to_string()).collect()))
+            .unwrap_or_default();
         let mut out = Vec::with_capacity(names.len());
         for (i, (path, attrs, delim)) in names.into_iter().enumerate() {
             let mut m = Mailbox::new(&path, &attrs, delim.as_deref());
+            if !subscribed.is_empty() {
+                m.subscribed = path.eq_ignore_ascii_case("INBOX") || subscribed.contains(&path);
+            }
             if !m.no_select
                 && i < 60
                 && let Some((total, unread)) = self.status(&path)
@@ -441,6 +449,10 @@ impl MailBackend for ImapSmtpBackend {
 
     fn create_mailbox(&mut self, path: &str) -> Result<()> {
         self.call(|s| s.create(path))
+    }
+
+    fn subscribe(&mut self, path: &str, subscribed: bool) -> Result<()> {
+        self.call(|s| if subscribed { s.subscribe(path) } else { s.unsubscribe(path) })
     }
 
     fn send(&mut self, from: &str, to: &[String], raw: &[u8]) -> Result<()> {

@@ -44,6 +44,26 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Accounts" => "Account",
         "Add account" => "Aggiungi account",
         "All accounts" => "Tutti gli account",
+        "Message sent, but the copy to the Sent folder failed: {error}" => "Messaggio inviato, ma la copia in Posta inviata non è riuscita: {error}",
+        "Folders on the server" => "Cartelle sul server",
+        "Shown" => "Mostrata",
+        "Hidden" => "Nascosta",
+        "Automatic" => "Automatica",
+        "Sent folder" => "Cartella Posta inviata",
+        "Drafts folder" => "Cartella Bozze",
+        "Trash folder" => "Cartella Cestino",
+        "Spam folder" => "Cartella Spam",
+        "Archive folder" => "Cartella Archivio",
+        "Refresh folders" => "Aggiorna cartelle",
+        "New folder" => "Nuova cartella",
+        "Create" => "Crea",
+        "Save the account first: its folders are listed here, with the ones to show in the navigation and the special folders (sent, drafts, trash, spam, archive)." => {
+            "Salva prima l'account: qui compaiono le sue cartelle, con quelle da mostrare nella navigazione e le cartelle speciali (inviata, bozze, cestino, spam, archivio)."
+        }
+        "Unchecked folders stay on the server but leave the navigation (IMAP subscription). The special folders are found by name; pick them here when the server names them differently." => {
+            "Le cartelle non spuntate restano sul server ma escono dalla navigazione (sottoscrizione IMAP). Le cartelle speciali si riconoscono dal nome: scegli qui quelle giuste se il server le chiama diversamente."
+        }
+        "Folder" => "Cartella",
         "{n} accounts" => "{n} account",
         "No messages" => "Nessun messaggio",
         "No messages match the search" => "Nessun messaggio corrisponde alla ricerca",

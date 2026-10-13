@@ -16,6 +16,8 @@ pub struct Stored {
 #[derive(Debug, Default)]
 pub struct Store {
     pub folders: BTreeMap<String, (Vec<String>, u32, Vec<Stored>)>,
+    /// Folders the client unsubscribed from (everything is subscribed at first).
+    pub unsubscribed: Vec<String>,
     pub user: String,
     pub password: String,
     pub smtp_received: Vec<(String, Vec<String>, Vec<u8>)>,
@@ -170,11 +172,23 @@ fn imap_conn(stream: TcpStream, store: Shared) {
                     no(&mut w, "[AUTHENTICATIONFAILED] wrong user or password");
                 }
             }
-            "LIST" => {
+            "LIST" | "LSUB" => {
                 let s = store.lock().expect("lock");
                 for (name, (attrs, _, _)) in &s.folders {
+                    if cmd == "LSUB" && s.unsubscribed.contains(name) {
+                        continue;
+                    }
                     let a = if attrs.is_empty() { "\\HasNoChildren".to_string() } else { attrs.join(" ") };
-                    let _ = w.write_all(format!("* LIST ({a}) \"/\" \"{name}\"\r\n").as_bytes());
+                    let _ = w.write_all(format!("* {cmd} ({a}) \"/\" \"{name}\"\r\n").as_bytes());
+                }
+                ok(&mut w, "done");
+            }
+            "SUBSCRIBE" | "UNSUBSCRIBE" => {
+                let mut s = store.lock().expect("lock");
+                let name = args.first().cloned().unwrap_or_default();
+                s.unsubscribed.retain(|n| *n != name);
+                if cmd == "UNSUBSCRIBE" {
+                    s.unsubscribed.push(name);
                 }
                 ok(&mut w, "done");
             }

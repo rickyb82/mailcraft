@@ -119,6 +119,13 @@ pub struct Mailbox {
     /// Cannot hold messages (a container of sub-folders).
     #[serde(default)]
     pub no_select: bool,
+    /// Subscribed on the server (IMAP LSUB): the navigation shows subscribed folders.
+    #[serde(default = "yes")]
+    pub subscribed: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Mailbox {
@@ -126,7 +133,7 @@ impl Mailbox {
         let name = delimiter.and_then(|d| path.rsplit(d).next()).unwrap_or(path).to_string();
         let role = Role::detect(path, attributes);
         let no_select = attributes.iter().any(|a| a.eq_ignore_ascii_case("\\noselect") || a.eq_ignore_ascii_case("\\nonexistent"));
-        Self { path: path.to_string(), name, role, unread: 0, total: 0, no_select }
+        Self { path: path.to_string(), name, role, unread: 0, total: 0, no_select, subscribed: true }
     }
 
     /// Nesting depth from the delimiter in the path.

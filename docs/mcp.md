@@ -50,7 +50,7 @@ try the tools. `--home DIR` uses another configuration directory.
 | `save_attachment` | Save an attachment to a path |
 | `send_mail`, `reply`, `forward` | Send (signature added), reply with quote (`all`), forward with attachments |
 | `mark`, `archive`, `trash`, `spam`, `move` | Flags and moves by uid |
-| `save_draft`, `create_folder` | Drafts and folders |
+| `save_draft`, `create_folder`, `subscribe_folder` | Drafts and folders (hide a folder from the navigation with `subscribed: false`) |
 | `list_commands`, `run_command` | Every engine command |
 
 Resources: `mailcraft://accounts` (accounts and status) and `mailcraft://inbox` (the current

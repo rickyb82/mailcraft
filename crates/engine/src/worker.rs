@@ -78,6 +78,10 @@ pub enum JobKind {
     CreateMailbox {
         path: String,
     },
+    Subscribe {
+        path: String,
+        subscribed: bool,
+    },
     /// Connect, list mailboxes and test SMTP with a fresh backend (no state kept).
     Test,
     /// Try the candidate (imap, smtp) pairs until one logs in; the first working pair wins.
@@ -100,18 +104,67 @@ pub struct Job {
 #[derive(Clone, Debug)]
 pub enum Output {
     Mailboxes(Vec<Mailbox>, String),
-    Envelopes { mailbox: String, page: Page, list: Vec<Envelope> },
-    EnvelopesByUid { mailbox: String, list: Vec<Envelope> },
-    Message { mailbox: String, uid: u32, raw: Vec<u8>, message: Box<Message> },
-    Flagged { mailbox: String, uids: Vec<u32>, change: FlagChange },
-    Moved { mailbox: String, uids: Vec<u32>, to: String },
-    Deleted { mailbox: String, uids: Vec<u32> },
-    Appended { mailbox: String, uid: Option<u32>, replaced: Option<u32> },
-    Search { mailbox: String, query: SearchQuery, list: Vec<Envelope> },
-    Sent { message_id: String, copied_to: Option<String> },
-    Created { path: String },
-    Tested { mailboxes: usize, smtp: Result<()> },
-    Probed { imap: Server, smtp: Server, tried: Vec<String> },
+    Envelopes {
+        mailbox: String,
+        page: Page,
+        list: Vec<Envelope>,
+    },
+    EnvelopesByUid {
+        mailbox: String,
+        list: Vec<Envelope>,
+    },
+    Message {
+        mailbox: String,
+        uid: u32,
+        raw: Vec<u8>,
+        message: Box<Message>,
+    },
+    Flagged {
+        mailbox: String,
+        uids: Vec<u32>,
+        change: FlagChange,
+    },
+    Moved {
+        mailbox: String,
+        uids: Vec<u32>,
+        to: String,
+    },
+    Deleted {
+        mailbox: String,
+        uids: Vec<u32>,
+    },
+    Appended {
+        mailbox: String,
+        uid: Option<u32>,
+        replaced: Option<u32>,
+    },
+    Search {
+        mailbox: String,
+        query: SearchQuery,
+        list: Vec<Envelope>,
+    },
+    /// `copy_error` says why the copy to the Sent folder failed, when it did.
+    Sent {
+        message_id: String,
+        copied_to: Option<String>,
+        copy_error: Option<String>,
+    },
+    Created {
+        path: String,
+    },
+    Subscribed {
+        path: String,
+        subscribed: bool,
+    },
+    Tested {
+        mailboxes: usize,
+        smtp: Result<()>,
+    },
+    Probed {
+        imap: Server,
+        smtp: Server,
+        tried: Vec<String>,
+    },
     Disconnected,
 }
 
@@ -270,20 +323,14 @@ fn execute(factory: &BackendFactory, slots: &mut HashMap<String, Slot>, job: &Jo
         JobKind::Send { from, to, raw, copy_to, answered, delete_draft } => {
             b.send(from, to, raw)?;
             let message_id = mime::parse_headers(raw).map(|e| e.message_id).unwrap_or_default();
-            let mut copied = None;
-            if let Some(folder) = copy_to {
-                let flags = Flags { seen: true, ..Flags::default() };
-                if b.append(folder, raw, flags).is_ok() {
-                    copied = Some(folder.clone());
-                }
-            }
+            let (copied, copy_error) = copy_sent(b.as_mut(), copy_to.as_deref(), raw);
             if let Some((mailbox, uid)) = answered {
                 let _ = b.set_flag(mailbox, &[*uid], FlagChange::Answered(true));
             }
             if let Some((mailbox, uid)) = delete_draft {
                 let _ = b.delete(mailbox, &[*uid]);
             }
-            Ok(Output::Sent { message_id, copied_to: copied })
+            Ok(Output::Sent { message_id, copied_to: copied, copy_error })
         }
         JobKind::Respond { mailbox, uid, body, all, forward_to, from, signature, italian, copy_to, quote } => {
             let raw = b.fetch(mailbox, *uid)?;
@@ -292,22 +339,37 @@ fn execute(factory: &BackendFactory, slots: &mut HashMap<String, Slot>, job: &Jo
             let message_id = format!("<{}.{}@{}>", time::now(), uid, from.email.split('@').nth(1).unwrap_or("mailcraft"));
             let out = mime::build(&draft, from, time::now(), &message_id)?;
             b.send(&from.email, &draft.recipients(), &out)?;
-            let mut copied = None;
-            if let Some(folder) = copy_to
-                && b.append(folder, &out, Flags { seen: true, ..Flags::default() }).is_ok()
-            {
-                copied = Some(folder.clone());
-            }
+            let (copied, copy_error) = copy_sent(b.as_mut(), copy_to.as_deref(), &out);
             if forward_to.is_empty() {
                 let _ = b.set_flag(mailbox, &[*uid], FlagChange::Answered(true));
             }
-            Ok(Output::Sent { message_id, copied_to: copied })
+            Ok(Output::Sent { message_id, copied_to: copied, copy_error })
         }
         JobKind::CreateMailbox { path } => {
             b.create_mailbox(path)?;
             Ok(Output::Created { path: path.clone() })
         }
+        JobKind::Subscribe { path, subscribed } => {
+            b.subscribe(path, *subscribed)?;
+            Ok(Output::Subscribed { path: path.clone(), subscribed: *subscribed })
+        }
         JobKind::Disconnect | JobKind::Test | JobKind::Probe { .. } => Err(Error::Server("handled above".into())),
+    }
+}
+
+/// Copies a sent message to the Sent folder, creating the folder when the server lacks it.
+/// Returns the folder it landed in, or why it did not (the message itself was sent).
+fn copy_sent(b: &mut dyn MailBackend, folder: Option<&str>, raw: &[u8]) -> (Option<String>, Option<String>) {
+    let Some(folder) = folder else { return (None, None) };
+    let flags = Flags { seen: true, ..Flags::default() };
+    match b.append(folder, raw, flags) {
+        Ok(_) => (Some(folder.to_string()), None),
+        Err(first) => {
+            if b.create_mailbox(folder).is_ok() && b.append(folder, raw, flags).is_ok() {
+                return (Some(folder.to_string()), None);
+            }
+            (None, Some(first.to_string()))
+        }
     }
 }
 

@@ -164,6 +164,8 @@ impl MailApp {
                     self.settings.reload = true;
                     if self.session.has_password(&id) || v["account"]["has_password"] == true {
                         self.run("account.test", json!({"id": id}));
+                        // Load the folders right away: the form lists them.
+                        self.run("mail.sync", json!({"account": id}));
                     }
                 }
             }
@@ -173,6 +175,14 @@ impl MailApp {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Opens the settings form of an account.
+    pub fn settings_edit(&mut self, id: &str) {
+        if let Some(a) = self.session.account(id).cloned() {
+            self.screen = Screen::Settings;
+            self.settings.editing = Some(settings::AccountForm::from_account(&a));
         }
     }
 
@@ -261,7 +271,12 @@ impl MailApp {
             match c.result {
                 Ok(v) => match c.command.as_str() {
                     "account.suggest" | "account.add" | "account.update" | "mail.attachment" => self.handle_result(&c.command, &v),
-                    "mail.send" | "mail.reply" | "mail.forward" => self.toast(self.tr("Message sent").to_string()),
+                    "mail.send" | "mail.reply" | "mail.forward" => {
+                        if let Some(e) = v["copy_error"].as_str() {
+                            self.status = self.language.fill("Message sent, but the copy to the Sent folder failed: {error}", &[("error", e)]);
+                        }
+                        self.toast(self.tr("Message sent").to_string());
+                    }
                     "draft.save" => self.toast(self.tr("Draft saved").to_string()),
                     "account.test" => {
                         let text = if v["ok"] == true {
@@ -375,16 +390,7 @@ impl MailApp {
         self.reading_full = false;
         self.expanded.clear();
         self.run("selection.clear", json!({}));
-        if let Some(v) = self.session.view().open.clone() {
-            let _ = v;
-        }
-        self.run("view.get", json!({}));
-        self.session_clear_open();
-    }
-
-    fn session_clear_open(&mut self) {
-        // The view's open message is cleared through a selection change (no command needed).
-        let _ = self.run("selection.clear", json!({}));
+        self.run("mail.close", json!({}));
     }
 
     /// Runs a move-style command on the selection (or the open message), with an undo toast.
@@ -796,6 +802,13 @@ mod tests {
         frame(&mut app, &ctx, vec![key(egui::Key::E, egui::Modifiers::NONE)]);
         settle(&mut app, &ctx);
         assert!(app.session.current().unwrap().envelope("INBOX", first).is_none(), "archived");
+        // Open, then the X (Escape) closes the reader.
+        let second = list::visible_uids(&app)[0];
+        app.open(second);
+        settle(&mut app, &ctx);
+        assert!(app.session.view().open.is_some());
+        frame(&mut app, &ctx, vec![key(egui::Key::Escape, egui::Modifiers::NONE)]);
+        assert!(app.session.view().open.is_none(), "the reader closed");
         // j/k move the selection, c opens compose, Escape minimises it, settings render.
         frame(&mut app, &ctx, vec![key(egui::Key::J, egui::Modifiers::NONE)]);
         frame(&mut app, &ctx, vec![key(egui::Key::J, egui::Modifiers::NONE)]);

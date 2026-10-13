@@ -32,6 +32,10 @@ triage and answer your mail. Part of the *craft* family (`gridcraft`, `ideacraft
   message list with stars, hover actions and bulk actions, a reading pane (or full view), a
   compose card docked at the bottom right, light and dark themes, English and Italian, keyboard
   shortcuts (`c` compose, `/` search, `j`/`k`, `e` archive, `#` trash, `s` star, `r` reply…).
+- **Your folders, your way** — the account form lists the server's folders: untick one to hide
+  it from the navigation (IMAP subscription), pick the Sent, Drafts, Trash, Spam and Archive
+  folders when the server names them unusually, create folders. Sent mail is copied to the
+  Sent folder, which MailCraft creates when the server has none.
 - **Several accounts, one inbox** — switch account from the avatar at the top right, like on
   Gmail, or choose *All accounts*: a unified inbox (and starred, sent, drafts… across accounts)
   where every row carries its account's colour, actions go to the right server and the compose
