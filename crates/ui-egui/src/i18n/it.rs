@@ -49,7 +49,14 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Sign in with {provider}" => "Accedi con {provider}",
         "Signed in with {provider}" => "Accesso con {provider} attivo",
         "Sign in again" => "Accedi di nuovo",
-        "Create the {provider} client first (fields below)" => "Crea prima il client {provider} (campi qui sotto)",
+        "Signing in with {provider} needs its OAuth client, created once (usually by the administrator): paste its id and secret here and save, then the sign-in button appears." => {
+            "Per accedere con {provider} serve il suo client OAuth, creato una volta sola (di solito dall'amministratore): incolla qui id e segreto e salva, poi compare il pulsante di accesso."
+        }
+        "Or, without a client:" => "Oppure, senza client:",
+        "Use an app password" => "Usa una password per le app",
+        "Not the account password: an app password from the {provider} account (two-step verification on)" => {
+            "Non la password dell'account: una password per le app dall'account {provider} (con la verifica in due passaggi attiva)"
+        }
         "Complete the sign-in in the browser, then come back here (return address registered with the provider: {redirect})" => {
             "Completa l'accesso nel browser, poi torna qui (indirizzo di ritorno da registrare presso il provider: {redirect})"
         }

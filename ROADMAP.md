@@ -52,6 +52,7 @@
 - Rules/filters, signatures per identity, aliases.
 
 ## Progress log
+- 2026-10-15: adding a Gmail/Microsoft account without the OAuth client no longer shows a greyed-out sign-in button: the form explains the client, has its fields right there, and offers the app-password route.
 
 | Date | Change |
 |---|---|

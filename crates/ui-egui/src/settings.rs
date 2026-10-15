@@ -280,8 +280,6 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
     section(ui, t, app.tr(if f.id.is_some() { "Edit Account" } else { "Add account" }));
     let frame = egui::Frame::NONE.fill(t.card).stroke(Stroke::new(1.0, t.border)).corner_radius(10).inner_margin(16);
     let mut action: Option<&str> = None;
-    // The provider whose OAuth client is still missing (its fields are shown in the form).
-    let mut needs_client: Option<&'static oauth::Provider> = None;
     frame.show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::Grid::new("account-form").num_columns(2).spacing(vec2(12.0, 8.0)).min_col_width(200.0).show(ui, |ui| {
@@ -317,32 +315,55 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
             ui.end_row();
             if f.auth.is_empty() {
                 row(ui, app.tr("Password"), &mut f.password, true);
+                if let Some(p) = oauth::provider_for_email(&f.email) {
+                    ui.label("");
+                    ui.label(
+                        RichText::new(app.language.fill("Not the account password: an app password from the {provider} account (two-step verification on)", &[("provider", p.name)]))
+                            .small()
+                            .color(t.muted),
+                    );
+                    ui.end_row();
+                }
             } else {
                 let provider = oauth::provider(&f.auth).map(|p| p.name).unwrap_or("OAuth");
                 let ready = app.session.oauth_ready().contains(&f.auth);
                 let signed = f.id.as_ref().is_some_and(|id| app.session.has_password(id));
                 ui.label("");
-                ui.horizontal(|ui| {
-                    if signed {
-                        ui.label(RichText::new(app.language.fill("Signed in with {provider}", &[("provider", provider)])).color(t.accent));
-                    }
-                    let label = if signed {
-                        app.tr("Sign in again").to_string()
-                    } else {
-                        app.language.fill("Sign in with {provider}", &[("provider", provider)])
-                    };
-                    if ui.add_enabled(ready, egui::Button::new(label)).clicked() {
-                        action = Some("oauth");
-                    }
-                    if !ready {
-                        needs_client = oauth::provider(&f.auth);
+                if ready {
+                    ui.horizontal(|ui| {
+                        if signed {
+                            ui.label(RichText::new(app.language.fill("Signed in with {provider}", &[("provider", provider)])).color(t.accent));
+                        }
+                        let label = if signed {
+                            app.tr("Sign in again").to_string()
+                        } else {
+                            app.language.fill("Sign in with {provider}", &[("provider", provider)])
+                        };
+                        if ui.button(label).clicked() {
+                            action = Some("oauth");
+                        }
+                    });
+                } else if let Some(p) = oauth::provider(&f.auth) {
+                    // No client yet: say so where the person is looking, with the fields right here
+                    // and the password alternative, instead of a greyed-out button.
+                    ui.vertical(|ui| {
                         ui.label(
-                            RichText::new(app.language.fill("Create the {provider} client first (fields below)", &[("provider", provider)]))
-                                .small()
-                                .color(t.muted),
+                            RichText::new(app.language.fill(
+                                "Signing in with {provider} needs its OAuth client, created once (usually by the administrator): paste its id and secret here and save, then the sign-in button appears.",
+                                &[("provider", provider)],
+                            ))
+                            .color(t.ui_text),
                         );
-                    }
-                });
+                        oauth_client_form(app, ui, t, p);
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(app.tr("Or, without a client:")).small().color(t.muted));
+                            if ui.small_button(app.tr("Use an app password")).clicked() {
+                                f.auth = String::new();
+                            }
+                        });
+                    });
+                }
                 ui.end_row();
             }
             // A known address: fill the servers (and the sign-in method) in, as Thunderbird does.
@@ -380,11 +401,6 @@ fn account_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
             });
             ui.end_row();
         });
-        if let Some(p) = needs_client {
-            ui.add_space(6.0);
-            oauth_client_form(app, ui, t, p);
-            ui.add_space(6.0);
-        }
         ui.checkbox(&mut f.save_sent, app.tr("Copy sent mail to the Sent folder"));
         ui.checkbox(&mut f.trust_invalid_certs, app.tr("Accept invalid certificates (local bridges, self-hosted servers)"));
         folders_section(app, ui, t, &mut f);
@@ -632,20 +648,21 @@ fn oauth_client_form(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens, p: &'stat
     ui.label(RichText::new(app.language.fill("Redirect URI to register: {uri}", &[("uri", &redirect)])).small().color(t.muted));
     let (mut id, mut secret) = app.settings.oauth_clients.get(p.id).cloned().unwrap_or_default();
     let mut changed = false;
-    ui.horizontal(|ui| {
+    egui::Grid::new(("oauth-client", p.id)).num_columns(2).spacing(vec2(8.0, 6.0)).show(ui, |ui| {
         ui.label(RichText::new(app.tr("Client ID")).color(t.muted));
-        changed |= ui.add(egui::TextEdit::singleline(&mut id).desired_width(300.0)).changed();
+        changed |= ui.add(egui::TextEdit::singleline(&mut id).desired_width(360.0)).changed();
+        ui.end_row();
         ui.label(RichText::new(app.tr("Client secret")).color(t.muted));
-        changed |= ui.add(egui::TextEdit::singleline(&mut secret).password(true).desired_width(200.0)).changed();
-        if ui.add_enabled(!id.trim().is_empty(), egui::Button::new(app.tr("Save client"))).clicked() {
-            app.run("oauth.configure", json!({"provider": p.id, "client_id": id.trim(), "client_secret": secret.trim()}));
-            app.settings.oauth_clients.remove(p.id);
-            app.settings.result = app.tr("Saved").to_string();
-            changed = false;
-        } else if changed {
-            app.settings.oauth_clients.insert(p.id.to_string(), (id.clone(), secret.clone()));
-        }
+        changed |= ui.add(egui::TextEdit::singleline(&mut secret).password(true).desired_width(360.0)).changed();
+        ui.end_row();
     });
+    if ui.add_enabled(!id.trim().is_empty(), egui::Button::new(app.tr("Save client"))).clicked() {
+        app.run("oauth.configure", json!({"provider": p.id, "client_id": id.trim(), "client_secret": secret.trim()}));
+        app.settings.oauth_clients.remove(p.id);
+        app.settings.result = app.tr("Saved").to_string();
+    } else if changed {
+        app.settings.oauth_clients.insert(p.id.to_string(), (id.clone(), secret.clone()));
+    }
 }
 
 fn server_section(app: &mut MailApp, ui: &mut egui::Ui, t: &Tokens) {
